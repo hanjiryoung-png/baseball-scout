@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.env
+data/
+baseball_scout.db
+presentation_snapshot.db
