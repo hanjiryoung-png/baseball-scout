@@ -1,4 +1,5 @@
 
+
 import os, re, time, shutil, sqlite3
 from pathlib import Path
 from datetime import datetime
@@ -37,6 +38,12 @@ def init_db():
         saved_at TEXT,
         innings INTEGER,
         demo_ready INTEGER DEFAULT 1
+    );
+
+    CREATE TABLE IF NOT EXISTS favorites(
+        player_id TEXT PRIMARY KEY,
+        player_name TEXT NOT NULL,
+        saved_at TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS pitches(
@@ -268,6 +275,32 @@ def action(text):
     if "볼" in s: return "볼"
     return "기타"
 
+def is_favorite(player_id):
+    c = db()
+    row = c.execute("SELECT 1 FROM favorites WHERE player_id=?", (player_id,)).fetchone()
+    c.close()
+    return bool(row)
+
+def toggle_favorite(player_id, player_name):
+    c = db()
+    row = c.execute("SELECT 1 FROM favorites WHERE player_id=?", (player_id,)).fetchone()
+    if row:
+        c.execute("DELETE FROM favorites WHERE player_id=?", (player_id,))
+        action = "removed"
+    else:
+        c.execute(
+            "INSERT OR REPLACE INTO favorites(player_id,player_name,saved_at) VALUES(?,?,?)",
+            (player_id, player_name, datetime.now().isoformat(timespec="seconds"))
+        )
+        action = "added"
+    c.commit()
+    c.close()
+    snapshot_db()
+    return action
+
+def favorite_players():
+    return qdf("SELECT player_id, player_name FROM favorites ORDER BY saved_at DESC")
+
 def current_counts():
     return qdf("""
     SELECT
@@ -308,7 +341,7 @@ if "presentation_mode" not in st.session_state:
 top1, top2 = st.columns([5,1])
 with top1:
     st.markdown('<div class="brand">⚾ BASEBALL SCOUT</div>', unsafe_allow_html=True)
-
+    st.markdown('<div class="tagline">경기를 모을수록 선수와 팀의 패턴이 더 선명해집니다.</div>', unsafe_allow_html=True)
 with top2:
     st.session_state.presentation_mode = st.toggle("발표 모드", value=st.session_state.presentation_mode,
                                                    help="저장된 데이터만 사용합니다. NAVER에 새 요청을 보내지 않습니다.")
@@ -323,10 +356,19 @@ games = qdf("SELECT * FROM games ORDER BY game_date DESC, saved_at DESC")
 counts = current_counts()
 
 if nav == "홈":
-    a,b,c = st.columns(3)
+    a,b = st.columns(2)
     a.metric("저장 경기", int(counts.games))
-    b.metric("누적 투구", int(counts.pitches))
-    c.metric("등록 선수", int(counts.players))
+    b.metric("등록 선수", int(counts.players))
+
+    st.markdown("### ⭐ 관심 선수")
+    favs = favorite_players()
+    if favs.empty:
+        st.caption("선수 페이지에서 ☆를 눌러 관심 선수를 등록할 수 있습니다.")
+    else:
+        fav_cols = st.columns(min(4, len(favs)))
+        for pos, (_, row) in enumerate(favs.iterrows()):
+            with fav_cols[pos % len(fav_cols)]:
+                st.markdown(f"**★ {row['player_name']}**")
 
     st.markdown("### 최근 경기")
     if games.empty:
@@ -439,6 +481,13 @@ elif nav == "선수":
         label_map = {f"{r['name']} ({r['id']})": (r["id"],r["name"]) for _,r in players.iterrows()}
         selected = st.selectbox("선수 검색", list(label_map))
         player_id, player_name = label_map[selected]
+
+        fav_now = is_favorite(player_id)
+        fav_label = "★ 관심 선수 해제" if fav_now else "☆ 관심 선수 등록"
+        if st.button(fav_label, key=f"fav_{player_id}"):
+            toggle_favorite(player_id, player_name)
+            st.rerun()
+
         role = st.radio("", ["타자","투수"], horizontal=True, label_visibility="collapsed")
 
         if role == "타자":
