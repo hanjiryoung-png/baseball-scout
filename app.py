@@ -341,7 +341,7 @@ if "presentation_mode" not in st.session_state:
 top1, top2 = st.columns([5,1])
 with top1:
     st.markdown('<div class="brand">⚾ BASEBALL SCOUT</div>', unsafe_allow_html=True)
-    st.markdown('<div class="tagline">경기를 모을수록 선수와 팀의 패턴이 더 선명해집니다.</div>', unsafe_allow_html=True)
+
 with top2:
     st.session_state.presentation_mode = st.toggle("발표 모드", value=st.session_state.presentation_mode,
                                                    help="저장된 데이터만 사용합니다. NAVER에 새 요청을 보내지 않습니다.")
