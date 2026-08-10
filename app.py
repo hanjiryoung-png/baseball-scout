@@ -301,6 +301,150 @@ def toggle_favorite(player_id, player_name):
 def favorite_players():
     return qdf("SELECT player_id, player_name FROM favorites ORDER BY saved_at DESC")
 
+
+def import_parquet_to_db(raw):
+    required = {
+        "game_pk","game_date","home_team","away_team","inning","inning_topbot",
+        "at_bat_number","pitch_number","batter","pitcher",
+        "batter_name","pitcher_name","balls","strikes","outs_when_up"
+    }
+    missing = sorted(required - set(raw.columns))
+    if missing:
+        raise ValueError("필수 컬럼이 없습니다: " + ", ".join(missing))
+
+    work = raw.copy()
+    work["game_pk"] = work["game_pk"].astype(str)
+
+    # 이미 DB에 있는 경기는 통째로 제외:
+    # 같은 경기를 NAVER/Parquet에서 중복 저장하지 않음.
+    c = db()
+    existing = {
+        str(r[0]) for r in c.execute("SELECT game_id FROM games").fetchall()
+    }
+    new_game_ids = [g for g in work["game_pk"].dropna().unique().tolist() if g not in existing]
+
+    if not new_game_ids:
+        c.close()
+        return 0, 0, len(existing.intersection(set(work["game_pk"].unique())))
+
+    work = work[work["game_pk"].isin(new_game_ids)].copy()
+
+    # 경기 테이블
+    game_rows = []
+    for gid, g in work.groupby("game_pk", sort=False):
+        home_code = str(g["home_team"].iloc[0])
+        away_code = str(g["away_team"].iloc[0])
+        home = TEAM.get(home_code, home_code)
+        away = TEAM.get(away_code, away_code)
+        game_date = str(g["game_date"].iloc[0])[:10]
+        try:
+            innings = int(pd.to_numeric(g["inning"], errors="coerce").max())
+        except Exception:
+            innings = None
+        game_rows.append((
+            gid, game_date, away, home,
+            "Hugging Face · kbo_playbyplay v0",
+            datetime.now().isoformat(timespec="seconds"),
+            innings, 1
+        ))
+
+    c.executemany(
+        """INSERT OR IGNORE INTO games
+        (game_id,game_date,away_team,home_team,source,saved_at,innings,demo_ready)
+        VALUES(?,?,?,?,?,?,?,?)""",
+        game_rows
+    )
+
+    def val(row, col, default=None):
+        if col not in work.columns:
+            return default
+        v = row.get(col, default)
+        if pd.isna(v):
+            return default
+        return v
+
+    pitch_rows = []
+    for _, r in work.iterrows():
+        gid = str(r["game_pk"])
+        home_code = str(r["home_team"])
+        away_code = str(r["away_team"])
+        home = TEAM.get(home_code, home_code)
+        away = TEAM.get(away_code, away_code)
+
+        topbot = str(r["inning_topbot"]).lower()
+        is_bottom = topbot in ("bot", "bottom", "말")
+        half = "말" if is_bottom else "초"
+        offense = home if is_bottom else away
+        defense = away if is_bottom else home
+
+        at_bat = int(r["at_bat_number"]) if not pd.isna(r["at_bat_number"]) else 0
+        pitch_no = int(r["pitch_number"]) if not pd.isna(r["pitch_number"]) else 0
+        pitch_id = f"{gid}|{at_bat}|{pitch_no}"
+
+        pitch_type = (
+            val(r, "_naver_pitch_name")
+            or val(r, "pitch_name")
+            or val(r, "pitch_type")
+        )
+
+        result_code = val(r, "pitch_result") or val(r, "type")
+        pitch_text = val(r, "pitch_result")
+        pa_result = val(r, "events")
+
+        def as_int(x):
+            try:
+                return int(x) if x is not None and not pd.isna(x) else None
+            except Exception:
+                return None
+
+        def as_float(x):
+            try:
+                return float(x) if x is not None and not pd.isna(x) else None
+            except Exception:
+                return None
+
+        pitch_rows.append((
+            pitch_id,
+            gid,
+            as_int(val(r, "inning")),
+            half,
+            offense,
+            defense,
+            str(val(r, "pitcher", "") or ""),
+            str(val(r, "pitcher_name", "") or ""),
+            str(val(r, "batter", "") or ""),
+            str(val(r, "batter_name", "") or ""),
+            pitch_no,
+            str(pitch_type) if pitch_type is not None else None,
+            as_float(val(r, "release_speed_kmh")),
+            str(result_code) if result_code is not None else None,
+            str(pitch_text) if pitch_text is not None else None,
+            as_int(val(r, "balls")),
+            as_int(val(r, "strikes")),
+            as_int(val(r, "outs_when_up")),
+            as_float(val(r, "plate_x")),
+            as_float(val(r, "plate_z")),
+            str(pa_result) if pa_result is not None else None
+        ))
+
+    c.executemany(
+        "INSERT OR IGNORE INTO pitches VALUES(" + ",".join(["?"] * 21) + ")",
+        pitch_rows
+    )
+    c.commit()
+
+    inserted_games = len(new_game_ids)
+    inserted_pitches = c.execute(
+        "SELECT COUNT(*) FROM pitches WHERE game_id IN ({})".format(
+            ",".join(["?"] * len(new_game_ids))
+        ),
+        new_game_ids
+    ).fetchone()[0]
+    c.close()
+
+    snapshot_db()
+    return inserted_games, inserted_pitches, len(existing.intersection(set(raw["game_pk"].astype(str).unique())))
+
 def current_counts():
     return qdf("""
     SELECT
@@ -428,12 +572,17 @@ elif nav == "경기 추가":
 
 elif nav == "데이터 관리":
     st.markdown("## 기본 데이터 불러오기")
-    st.caption("2026 Play-by-Play Parquet 파일을 읽어 데이터 구조를 먼저 확인합니다.")
+
+    stored = current_counts()
+    s1, s2 = st.columns(2)
+    s1.metric("저장 경기", int(stored.games))
+    s2.metric("등록 선수", int(stored.players))
 
     uploaded = st.file_uploader(
         "Parquet 파일 선택",
         type=["parquet"],
-        accept_multiple_files=False
+        accept_multiple_files=False,
+        key="parquet_uploader"
     )
 
     if uploaded is not None:
@@ -450,28 +599,39 @@ elif nav == "데이터 관리":
             else:
                 c3.metric("경기 수", "-")
 
-            st.markdown("### 컬럼")
-            cols = pd.DataFrame({
-                "번호": range(1, len(raw.columns) + 1),
-                "컬럼명": list(raw.columns),
-                "자료형": [str(raw[c].dtype) for c in raw.columns]
-            })
-            st.dataframe(cols, use_container_width=True, hide_index=True)
+            if st.button("데이터 업데이트", type="primary", use_container_width=True):
+                with st.spinner("데이터를 저장하고 있습니다..."):
+                    added_games, added_pitches, skipped_games = import_parquet_to_db(raw)
 
-            st.markdown("### 데이터 미리보기")
-            st.dataframe(raw.head(20), use_container_width=True, hide_index=True)
+                if added_games > 0:
+                    st.success(
+                        f"데이터 업데이트가 완료되었습니다. "
+                        f"{added_games:,}경기 · {added_pitches:,}개 투구를 저장했습니다."
+                    )
+                else:
+                    st.info("이미 저장된 데이터입니다.")
 
-            if "game_date" in raw.columns:
-                try:
+                if skipped_games > 0:
+                    st.caption(f"기존에 저장되어 있던 {skipped_games:,}경기는 중복 저장하지 않았습니다.")
+
+                st.rerun()
+
+            with st.expander("데이터 정보 보기"):
+                st.markdown("### 컬럼")
+                cols = pd.DataFrame({
+                    "번호": range(1, len(raw.columns) + 1),
+                    "컬럼명": list(raw.columns),
+                    "자료형": [str(raw[c].dtype) for c in raw.columns]
+                })
+                st.dataframe(cols, use_container_width=True, hide_index=True)
+
+                st.markdown("### 데이터 미리보기")
+                st.dataframe(raw.head(20), use_container_width=True, hide_index=True)
+
+                if "game_date" in raw.columns:
                     dates = pd.to_datetime(raw["game_date"], errors="coerce")
                     if dates.notna().any():
-                        st.caption(
-                            f"데이터 기간: {dates.min().date()} ~ {dates.max().date()}"
-                        )
-                except Exception:
-                    pass
-
-
+                        st.caption(f"데이터 기간: {dates.min().date()} ~ {dates.max().date()}")
 
         except Exception as e:
             st.error(f"Parquet 파일을 읽지 못했습니다: {e}")
