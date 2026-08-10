@@ -471,7 +471,7 @@ elif nav == "데이터 관리":
                 except Exception:
                     pass
 
-            st.info("현재 단계에서는 DB에 저장하지 않습니다. 데이터 구조 확인 후 기존 NAVER 데이터와 연결 규칙을 확정합니다.")
+
 
         except Exception as e:
             st.error(f"Parquet 파일을 읽지 못했습니다: {e}")
