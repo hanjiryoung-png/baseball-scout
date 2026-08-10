@@ -264,7 +264,7 @@ def collect_game(text):
 
     # 성공한 순간 발표용 백업 갱신
     snapshot_db()
-    return "new", f"{away} vs {home} 경기가 추가되었습니다."
+    return "new", f"경기가 추가되었습니다. ({away} vs {home})"
 
 def action(text):
     s = str(text or "")
@@ -425,7 +425,6 @@ elif nav == "경기 추가":
                     st.error(f"수집을 중단했습니다: {e}")
                     break
                 progress.progress(i / len(values[:5]))
-            st.caption("추가된 경기는 자동으로 저장되며, 발표 모드에서도 그대로 사용할 수 있습니다.")
 
 elif nav == "팀":
     st.markdown("## 팀")
@@ -535,8 +534,3 @@ elif nav == "선수":
                 loc = d[["plate_x","plate_y","pitch_type"]].dropna(subset=["plate_x","plate_y"])
                 if not loc.empty:
                     st.scatter_chart(loc, x="plate_x", y="plate_y", color="pitch_type")
-
-# 발표 안정성 표시: 일반 사용자에게는 기술 설명 최소화
-if not st.session_state.presentation_mode and counts.games > 0:
-    st.divider()
-    st.caption("저장된 경기는 발표 모드에서도 그대로 사용할 수 있습니다.")
