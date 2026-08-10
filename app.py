@@ -313,7 +313,7 @@ def current_counts():
       )) players
     """).iloc[0]
 
-st.set_page_config(page_title="BASEBALL SCOUT", page_icon="⚾", layout="wide")
+st.set_page_config(page_title="K-BASEBALL DATA DUGOUT", page_icon="⚾", layout="wide")
 init_db()
 
 # 최초 실행 시 스냅샷이 없으면 빈 DB라도 백업 파일 생성
@@ -340,7 +340,7 @@ if "presentation_mode" not in st.session_state:
 
 top1, top2 = st.columns([5,1])
 with top1:
-    st.markdown('<div class="brand">⚾ BASEBALL SCOUT</div>', unsafe_allow_html=True)
+    st.markdown('<div class="brand">⚾ K-BASEBALL DATA DUGOUT</div>', unsafe_allow_html=True)
 
 with top2:
     st.session_state.presentation_mode = st.toggle("발표 모드", value=st.session_state.presentation_mode,
@@ -349,7 +349,7 @@ with top2:
 if st.session_state.presentation_mode:
     st.caption("발표 모드 · 저장된 데이터만 사용 중")
 
-nav_items = ["홈","팀","선수"] if st.session_state.presentation_mode else ["홈","경기 추가","팀","선수"]
+nav_items = ["홈","팀","선수"] if st.session_state.presentation_mode else ["홈","경기 추가","데이터 관리","팀","선수"]
 nav = st.radio("", nav_items, horizontal=True, label_visibility="collapsed")
 
 games = qdf("SELECT * FROM games ORDER BY game_date DESC, saved_at DESC")
@@ -425,6 +425,56 @@ elif nav == "경기 추가":
                     st.error(f"수집을 중단했습니다: {e}")
                     break
                 progress.progress(i / len(values[:5]))
+
+elif nav == "데이터 관리":
+    st.markdown("## 기본 데이터 불러오기")
+    st.caption("2026 Play-by-Play Parquet 파일을 읽어 데이터 구조를 먼저 확인합니다.")
+
+    uploaded = st.file_uploader(
+        "Parquet 파일 선택",
+        type=["parquet"],
+        accept_multiple_files=False
+    )
+
+    if uploaded is not None:
+        try:
+            raw = pd.read_parquet(uploaded)
+
+            st.success("Parquet 파일을 정상적으로 읽었습니다.")
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("행 수", f"{len(raw):,}")
+            c2.metric("열 수", len(raw.columns))
+            if "game_pk" in raw.columns:
+                c3.metric("경기 수", f"{raw['game_pk'].nunique():,}")
+            else:
+                c3.metric("경기 수", "-")
+
+            st.markdown("### 컬럼")
+            cols = pd.DataFrame({
+                "번호": range(1, len(raw.columns) + 1),
+                "컬럼명": list(raw.columns),
+                "자료형": [str(raw[c].dtype) for c in raw.columns]
+            })
+            st.dataframe(cols, use_container_width=True, hide_index=True)
+
+            st.markdown("### 데이터 미리보기")
+            st.dataframe(raw.head(20), use_container_width=True, hide_index=True)
+
+            if "game_date" in raw.columns:
+                try:
+                    dates = pd.to_datetime(raw["game_date"], errors="coerce")
+                    if dates.notna().any():
+                        st.caption(
+                            f"데이터 기간: {dates.min().date()} ~ {dates.max().date()}"
+                        )
+                except Exception:
+                    pass
+
+            st.info("현재 단계에서는 DB에 저장하지 않습니다. 데이터 구조 확인 후 기존 NAVER 데이터와 연결 규칙을 확정합니다.")
+
+        except Exception as e:
+            st.error(f"Parquet 파일을 읽지 못했습니다: {e}")
 
 elif nav == "팀":
     st.markdown("## 팀")
