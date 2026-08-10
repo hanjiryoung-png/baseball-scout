@@ -14,6 +14,12 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "baseball_scout.db"
 SNAPSHOT_PATH = DATA_DIR / "presentation_snapshot.db"
 
+# 2026 Play-by-Play 기본 데이터
+# - GitHub 저장소 루트에 파일이 있으면 그 파일을 우선 사용
+# - 없으면 데이터 관리에서 업로드한 파일을 DATA_DIR에 보관하여 사용
+REPO_BASE_PARQUET = APP_DIR / "kbo_pbp_2026.parquet"
+UPLOADED_BASE_PARQUET = DATA_DIR / "kbo_pbp_2026.parquet"
+
 TEAM = {
     "KT":"KT","LG":"LG","SS":"삼성","OB":"두산","HT":"KIA",
     "SK":"SSG","WO":"키움","LT":"롯데","NC":"NC","HH":"한화"
@@ -302,6 +308,156 @@ def favorite_players():
     return qdf("SELECT player_id, player_name FROM favorites ORDER BY saved_at DESC")
 
 
+
+BASE_COLUMNS = [
+    "game_pk","game_date","home_team","away_team","inning","inning_topbot",
+    "at_bat_number","pitch_number","batter","pitcher","batter_name","pitcher_name",
+    "balls","strikes","outs_when_up","pitch_result","type",
+    "pitch_name","_naver_pitch_name","release_speed_kmh","plate_x","plate_z","events"
+]
+
+def get_base_parquet_path():
+    if REPO_BASE_PARQUET.exists():
+        return REPO_BASE_PARQUET
+    if UPLOADED_BASE_PARQUET.exists():
+        return UPLOADED_BASE_PARQUET
+    return None
+
+@st.cache_data(show_spinner=False)
+def load_base_parquet(path_text, modified_ns):
+    path = Path(path_text)
+    raw = pd.read_parquet(path, columns=BASE_COLUMNS)
+
+    # 현재 NAVER/SQLite 분석 화면에서 쓰는 공통 형식으로 변환
+    home = raw["home_team"].map(TEAM).fillna(raw["home_team"])
+    away = raw["away_team"].map(TEAM).fillna(raw["away_team"])
+    is_bottom = raw["inning_topbot"].astype(str).str.lower().isin(["bot","bottom","말"])
+
+    result_map = {
+        "T":"스트라이크",
+        "B":"볼",
+        "F":"파울",
+        "S":"헛스윙",
+        "H":"타격",
+    }
+
+    pitch_type = raw["_naver_pitch_name"].copy()
+    pitch_type = pitch_type.where(pitch_type.notna() & (pitch_type.astype(str) != ""), raw["pitch_name"])
+
+    d = pd.DataFrame({
+        "pitch_id": (
+            raw["game_pk"].astype(str) + "|" +
+            raw["at_bat_number"].astype(str) + "|" +
+            raw["pitch_number"].astype(str)
+        ),
+        "game_id": raw["game_pk"].astype(str),
+        "game_date": raw["game_date"].astype(str).str[:10],
+        "inning": raw["inning"],
+        "half": is_bottom.map({True:"말", False:"초"}),
+        "offense_team": home.where(is_bottom, away),
+        "defense_team": away.where(is_bottom, home),
+        "pitcher_id": raw["pitcher"].astype(str),
+        "pitcher_name": raw["pitcher_name"],
+        "batter_id": raw["batter"].astype(str),
+        "batter_name": raw["batter_name"],
+        "pitch_num": raw["pitch_number"],
+        "pitch_type": pitch_type,
+        "speed": raw["release_speed_kmh"],
+        "result_code": raw["pitch_result"],
+        "pitch_text": raw["pitch_result"].map(result_map).fillna(raw["pitch_result"]),
+        "balls": raw["balls"],
+        "strikes": raw["strikes"],
+        "outs": raw["outs_when_up"],
+        "plate_x": raw["plate_x"],
+        "plate_y": raw["plate_z"],
+        "pa_result": raw["events"],
+    })
+
+    games = (
+        pd.DataFrame({
+            "game_id": raw["game_pk"].astype(str),
+            "game_date": raw["game_date"].astype(str).str[:10],
+            "away_team": away,
+            "home_team": home,
+        })
+        .drop_duplicates("game_id")
+        .reset_index(drop=True)
+    )
+    return d, games
+
+def base_data():
+    path = get_base_parquet_path()
+    if path is None:
+        return pd.DataFrame(), pd.DataFrame()
+    try:
+        stat = path.stat()
+        return load_base_parquet(str(path), stat.st_mtime_ns)
+    except Exception:
+        return pd.DataFrame(), pd.DataFrame()
+
+def extra_pitches():
+    return qdf("SELECT * FROM pitches")
+
+def extra_games():
+    return qdf("SELECT * FROM games")
+
+def all_pitches():
+    base_p, base_g = base_data()
+    extra = extra_pitches()
+
+    if base_p.empty:
+        return extra
+    if extra.empty:
+        return base_p
+
+    # 같은 경기 ID가 기본 Parquet에 이미 있으면 SQLite 쪽 중복 경기 제외
+    extra = extra[~extra["game_id"].astype(str).isin(set(base_p["game_id"].astype(str)))]
+    cols = list(base_p.columns)
+    for col in cols:
+        if col not in extra.columns:
+            extra[col] = None
+    return pd.concat([base_p, extra[cols]], ignore_index=True)
+
+def all_games():
+    base_p, base_g = base_data()
+    extra = extra_games()
+
+    if base_g.empty:
+        return extra
+    if extra.empty:
+        g = base_g.copy()
+        g["source"] = "Play-by-Play"
+        g["saved_at"] = ""
+        g["innings"] = None
+        g["demo_ready"] = 1
+        return g
+
+    extra = extra[~extra["game_id"].astype(str).isin(set(base_g["game_id"].astype(str)))]
+    g = base_g.copy()
+    g["source"] = "Play-by-Play"
+    g["saved_at"] = ""
+    g["innings"] = None
+    g["demo_ready"] = 1
+    return pd.concat([g[extra.columns], extra], ignore_index=True)
+
+def combined_counts():
+    g = all_games()
+    p = all_pitches()
+    if p.empty:
+        players = 0
+    else:
+        ids = pd.concat([
+            p["pitcher_id"].dropna().astype(str),
+            p["batter_id"].dropna().astype(str)
+        ])
+        ids = ids[ids != ""]
+        players = ids.nunique()
+    return {
+        "games": int(g["game_id"].nunique()) if not g.empty else 0,
+        "pitches": int(len(p)),
+        "players": int(players)
+    }
+
 def import_parquet_to_db(raw):
     required = {
         "game_pk","game_date","home_team","away_team","inning","inning_topbot",
@@ -446,16 +602,9 @@ def import_parquet_to_db(raw):
     return inserted_games, inserted_pitches, len(existing.intersection(set(raw["game_pk"].astype(str).unique())))
 
 def current_counts():
-    return qdf("""
-    SELECT
-      (SELECT COUNT(*) FROM games) games,
-      (SELECT COUNT(*) FROM pitches) pitches,
-      (SELECT COUNT(DISTINCT id) FROM (
-        SELECT pitcher_id id FROM pitches WHERE COALESCE(pitcher_id,'')<>''
-        UNION
-        SELECT batter_id FROM pitches WHERE COALESCE(batter_id,'')<>''
-      )) players
-    """).iloc[0]
+    c = combined_counts()
+    return pd.Series(c)
+
 
 st.set_page_config(page_title="K-BASEBALL DATA DUGOUT", page_icon="⚾", layout="wide")
 init_db()
@@ -496,7 +645,9 @@ if st.session_state.presentation_mode:
 nav_items = ["홈","팀","선수"] if st.session_state.presentation_mode else ["홈","경기 추가","데이터 관리","팀","선수"]
 nav = st.radio("", nav_items, horizontal=True, label_visibility="collapsed")
 
-games = qdf("SELECT * FROM games ORDER BY game_date DESC, saved_at DESC")
+games = all_games()
+if not games.empty:
+    games = games.sort_values(["game_date","saved_at"], ascending=[False,False], na_position="last")
 counts = current_counts()
 
 if nav == "홈":
@@ -573,10 +724,19 @@ elif nav == "경기 추가":
 elif nav == "데이터 관리":
     st.markdown("## 기본 데이터 불러오기")
 
-    stored = current_counts()
-    s1, s2 = st.columns(2)
-    s1.metric("저장 경기", int(stored.games))
-    s2.metric("등록 선수", int(stored.players))
+    base_path = get_base_parquet_path()
+    if base_path is not None:
+        base_p, base_g = base_data()
+        if not base_p.empty:
+            st.success("기본 데이터가 준비되어 있습니다.")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("투구 데이터", f"{len(base_p):,}")
+            c2.metric("경기", f"{base_g['game_id'].nunique():,}")
+            player_ids = pd.concat([
+                base_p["pitcher_id"].dropna().astype(str),
+                base_p["batter_id"].dropna().astype(str)
+            ])
+            c3.metric("선수", f"{player_ids[player_ids!=''].nunique():,}")
 
     uploaded = st.file_uploader(
         "Parquet 파일 선택",
@@ -587,71 +747,57 @@ elif nav == "데이터 관리":
 
     if uploaded is not None:
         try:
-            raw = pd.read_parquet(uploaded)
+            # DB로 14만 행을 복사하지 않고 원본 Parquet 파일 자체를 기본 데이터로 보관
+            temp_path = DATA_DIR / "kbo_pbp_2026.uploading"
+            with open(temp_path, "wb") as f:
+                f.write(uploaded.getbuffer())
+            temp_path.replace(UPLOADED_BASE_PARQUET)
 
-            st.success("Parquet 파일을 정상적으로 읽었습니다.")
+            load_base_parquet.clear()
+            base_p, base_g = base_data()
 
-            c1, c2, c3 = st.columns(3)
-            c1.metric("행 수", f"{len(raw):,}")
-            c2.metric("열 수", len(raw.columns))
-            if "game_pk" in raw.columns:
-                c3.metric("경기 수", f"{raw['game_pk'].nunique():,}")
+            if base_p.empty:
+                st.error("파일을 읽지 못했습니다.")
             else:
-                c3.metric("경기 수", "-")
+                st.success("기본 데이터 업데이트가 완료되었습니다.")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("투구 데이터", f"{len(base_p):,}")
+                c2.metric("경기", f"{base_g['game_id'].nunique():,}")
+                player_ids = pd.concat([
+                    base_p["pitcher_id"].dropna().astype(str),
+                    base_p["batter_id"].dropna().astype(str)
+                ])
+                c3.metric("선수", f"{player_ids[player_ids!=''].nunique():,}")
 
-            if st.button("데이터 업데이트", type="primary", use_container_width=True):
-                with st.spinner("데이터를 저장하고 있습니다..."):
-                    added_games, added_pitches, skipped_games = import_parquet_to_db(raw)
-
-                if added_games > 0:
-                    st.success(
-                        f"데이터 업데이트가 완료되었습니다. "
-                        f"{added_games:,}경기 · {added_pitches:,}개 투구를 저장했습니다."
+                with st.expander("데이터 정보 보기"):
+                    st.caption(f"파일: {uploaded.name}")
+                    st.caption(
+                        f"기간: {base_g['game_date'].min()} ~ {base_g['game_date'].max()}"
                     )
-                else:
-                    st.info("이미 저장된 데이터입니다.")
-
-                if skipped_games > 0:
-                    st.caption(f"기존에 저장되어 있던 {skipped_games:,}경기는 중복 저장하지 않았습니다.")
-
-                st.rerun()
-
-            with st.expander("데이터 정보 보기"):
-                st.markdown("### 컬럼")
-                cols = pd.DataFrame({
-                    "번호": range(1, len(raw.columns) + 1),
-                    "컬럼명": list(raw.columns),
-                    "자료형": [str(raw[c].dtype) for c in raw.columns]
-                })
-                st.dataframe(cols, use_container_width=True, hide_index=True)
-
-                st.markdown("### 데이터 미리보기")
-                st.dataframe(raw.head(20), use_container_width=True, hide_index=True)
-
-                if "game_date" in raw.columns:
-                    dates = pd.to_datetime(raw["game_date"], errors="coerce")
-                    if dates.notna().any():
-                        st.caption(f"데이터 기간: {dates.min().date()} ~ {dates.max().date()}")
+                    st.dataframe(base_p.head(20), use_container_width=True, hide_index=True)
 
         except Exception as e:
             st.error(f"Parquet 파일을 읽지 못했습니다: {e}")
 
 elif nav == "팀":
     st.markdown("## 팀")
-    present = sorted(set(games.away_team.dropna()).union(set(games.home_team.dropna()))) if not games.empty else []
+
+    allp = all_pitches()
+    allg = all_games()
+    present = sorted(set(allg.away_team.dropna()).union(set(allg.home_team.dropna()))) if not allg.empty else []
     priority = [t for t in PRIORITY_TEAMS if t in present]
     options = priority + [t for t in present if t not in priority]
 
     if not options:
-        st.info("먼저 경기를 추가해 주세요.")
+        st.info("데이터를 먼저 추가해 주세요.")
     else:
         team = st.selectbox("팀 선택", options)
-        n_games = len(qdf("SELECT game_id FROM games WHERE away_team=? OR home_team=?", (team,team)))
-        thrown = qdf("SELECT * FROM pitches WHERE defense_team=?", (team,))
-        seen = qdf("SELECT * FROM pitches WHERE offense_team=?", (team,))
+        n_games = allg[(allg["away_team"] == team) | (allg["home_team"] == team)]["game_id"].nunique()
+        thrown = allp[allp["defense_team"] == team].copy() if not allp.empty else pd.DataFrame()
+        seen = allp[allp["offense_team"] == team].copy() if not allp.empty else pd.DataFrame()
 
         a,b,c = st.columns(3)
-        a.metric("저장 경기", n_games)
+        a.metric("경기", int(n_games))
         b.metric("투수진 투구", len(thrown))
         c.metric("타선이 본 투구", len(seen))
 
@@ -675,18 +821,23 @@ elif nav == "팀":
 
 elif nav == "선수":
     st.markdown("## 선수")
-    players = qdf("""
-    SELECT DISTINCT id,name FROM (
-        SELECT pitcher_id id,pitcher_name name FROM pitches
-        UNION
-        SELECT batter_id,batter_name FROM pitches
-    )
-    WHERE COALESCE(name,'')<>'' ORDER BY name
-    """)
+    allp = all_pitches()
 
-    if players.empty:
-        st.info("먼저 경기를 추가해 주세요.")
+    if allp.empty:
+        st.info("데이터를 먼저 추가해 주세요.")
     else:
+        pitchers = allp[["pitcher_id","pitcher_name"]].rename(
+            columns={"pitcher_id":"id","pitcher_name":"name"}
+        )
+        batters = allp[["batter_id","batter_name"]].rename(
+            columns={"batter_id":"id","batter_name":"name"}
+        )
+        players = pd.concat([pitchers, batters], ignore_index=True)
+        players = players.dropna(subset=["name"])
+        players["id"] = players["id"].astype(str)
+        players = players[(players["name"].astype(str) != "") & (players["id"] != "")]
+        players = players.drop_duplicates(["id","name"]).sort_values("name")
+
         label_map = {f"{r['name']} ({r['id']})": (r["id"],r["name"]) for _,r in players.iterrows()}
         selected = st.selectbox("선수 검색", list(label_map))
         player_id, player_name = label_map[selected]
@@ -700,7 +851,7 @@ elif nav == "선수":
         role = st.radio("", ["타자","투수"], horizontal=True, label_visibility="collapsed")
 
         if role == "타자":
-            d = qdf("SELECT * FROM pitches WHERE batter_id=?", (player_id,))
+            d = allp[allp["batter_id"].astype(str) == str(player_id)].copy()
             a,b,c = st.columns(3)
             a.metric("본 투구", len(d))
             b.metric("경기", d.game_id.nunique() if not d.empty else 0)
@@ -724,7 +875,7 @@ elif nav == "선수":
                 st.bar_chart(m.set_index("pitch_type")["투구수"])
 
         else:
-            d = qdf("SELECT * FROM pitches WHERE pitcher_id=?", (player_id,))
+            d = allp[allp["pitcher_id"].astype(str) == str(player_id)].copy()
             a,b,c = st.columns(3)
             a.metric("투구", len(d))
             b.metric("경기", d.game_id.nunique() if not d.empty else 0)
