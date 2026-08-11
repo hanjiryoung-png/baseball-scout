@@ -943,23 +943,49 @@ elif nav == "선수":
                 height=min(420, 38 * (len(list_view) + 1))
             )
 
-            # 분석할 선수는 목록에서 선택
-            label_map = {
-                f"{r['team']} · {r['role']} · {r['name']} ({r['id']})":
-                    (r["id"], r["name"])
-                for _, r in filtered.iterrows()
-            }
+            # 이름 검색 결과가 1명이면 추가 선택 없이 바로 분석 표시
+            # 구단/구분 필터로 목록을 보는 경우에는 목록에서 선수를 선택
+            player_id = None
+            player_name = None
 
-            selected = st.selectbox(
-                "분석할 선수 선택",
-                options=list(label_map.keys()),
-                index=None,
-                placeholder="선수를 선택하세요"
-            )
+            if search_name and len(filtered) == 1:
+                only = filtered.iloc[0]
+                player_id = str(only["id"])
+                player_name = only["name"]
 
-            if selected is not None:
-                player_id, player_name = label_map[selected]
+            elif search_name and len(filtered) > 1:
+                # 동명이인 또는 부분검색 결과가 여러 명일 때만 선택창 표시
+                label_map = {
+                    f"{r['team']} · {r['role']} · {r['name']} ({r['id']})":
+                        (str(r["id"]), r["name"])
+                    for _, r in filtered.iterrows()
+                }
+                selected = st.selectbox(
+                    "검색 결과에서 선수 선택",
+                    options=list(label_map.keys()),
+                    index=None,
+                    placeholder="선수를 선택하세요"
+                )
+                if selected is not None:
+                    player_id, player_name = label_map[selected]
 
+            else:
+                # 검색어 없이 구단/구분으로 목록을 보는 경우에만 선택창 사용
+                label_map = {
+                    f"{r['team']} · {r['role']} · {r['name']} ({r['id']})":
+                        (str(r["id"]), r["name"])
+                    for _, r in filtered.iterrows()
+                }
+                selected = st.selectbox(
+                    "분석할 선수 선택",
+                    options=list(label_map.keys()),
+                    index=None,
+                    placeholder="선수를 선택하세요"
+                )
+                if selected is not None:
+                    player_id, player_name = label_map[selected]
+
+            if player_id is not None:
                 fav_now = is_favorite(player_id)
                 fav_label = "★ 관심 선수 해제" if fav_now else "☆ 관심 선수 등록"
                 if st.button(fav_label, key=f"fav_{player_id}"):
