@@ -826,95 +826,226 @@ elif nav == "선수":
     if allp.empty:
         st.info("데이터를 먼저 추가해 주세요.")
     else:
-        pitchers = allp[["pitcher_id","pitcher_name"]].rename(
-            columns={"pitcher_id":"id","pitcher_name":"name"}
+        # 선수별 역할과 소속팀을 Play-by-Play 데이터에서 자동 구성합니다.
+        # 타자 = offense_team, 투수 = defense_team
+        batter_rows = allp[
+            ["batter_id","batter_name","offense_team","game_date"]
+        ].rename(columns={
+            "batter_id":"id",
+            "batter_name":"name",
+            "offense_team":"team",
+            "game_date":"game_date"
+        })
+        batter_rows["role"] = "타자"
+
+        pitcher_rows = allp[
+            ["pitcher_id","pitcher_name","defense_team","game_date"]
+        ].rename(columns={
+            "pitcher_id":"id",
+            "pitcher_name":"name",
+            "defense_team":"team",
+            "game_date":"game_date"
+        })
+        pitcher_rows["role"] = "투수"
+
+        role_rows = pd.concat([batter_rows, pitcher_rows], ignore_index=True)
+        role_rows = role_rows.dropna(subset=["id","name"])
+        role_rows["id"] = role_rows["id"].astype(str)
+        role_rows["name"] = role_rows["name"].astype(str)
+        role_rows["team"] = role_rows["team"].fillna("").astype(str)
+        role_rows["game_date"] = pd.to_datetime(role_rows["game_date"], errors="coerce")
+        role_rows = role_rows[
+            (role_rows["id"] != "") &
+            (role_rows["name"] != "") &
+            (role_rows["id"] != "nan") &
+            (role_rows["name"] != "nan")
+        ]
+
+        # 같은 선수가 시즌 중 여러 팀에 기록된 경우 가장 최근 경기의 팀을 현재 소속으로 표시
+        latest_team = (
+            role_rows
+            .sort_values("game_date")
+            .drop_duplicates(["id","role"], keep="last")
+            [["id","role","team"]]
         )
-        batters = allp[["batter_id","batter_name"]].rename(
-            columns={"batter_id":"id","batter_name":"name"}
+
+        player_master = (
+            role_rows[["id","name","role"]]
+            .drop_duplicates()
+            .merge(latest_team, on=["id","role"], how="left")
         )
-        players = pd.concat([pitchers, batters], ignore_index=True)
-        players = players.dropna(subset=["name"])
-        players["id"] = players["id"].astype(str)
-        players = players[(players["name"].astype(str) != "") & (players["id"] != "")]
-        players = players.drop_duplicates(["id","name"]).sort_values("name")
 
-        label_map = {f"{r['name']} ({r['id']})": (r["id"],r["name"]) for _,r in players.iterrows()}
-        selected = st.selectbox("선수 검색", list(label_map))
-        player_id, player_name = label_map[selected]
+        # 한 선수가 타자/투수 양쪽에 있으면 한 줄로 합치되 역할은 '투타'로 표시
+        grouped = []
+        for (pid, name), g in player_master.groupby(["id","name"], sort=False):
+            roles = set(g["role"].dropna())
+            if roles == {"타자","투수"}:
+                role_label = "투타"
+            elif "투수" in roles:
+                role_label = "투수"
+            else:
+                role_label = "타자"
 
-        fav_now = is_favorite(player_id)
-        fav_label = "★ 관심 선수 해제" if fav_now else "☆ 관심 선수 등록"
-        if st.button(fav_label, key=f"fav_{player_id}"):
-            toggle_favorite(player_id, player_name)
-            st.rerun()
+            # 가장 최근 역할별 팀 중 빈 값이 아닌 팀 하나를 사용
+            teams = [t for t in g["team"].tolist() if t]
+            team_label = teams[-1] if teams else ""
+            grouped.append({
+                "id": str(pid),
+                "name": name,
+                "team": team_label,
+                "role": role_label
+            })
 
-        batter_data = allp[allp["batter_id"].astype(str) == str(player_id)].copy()
-        pitcher_data = allp[allp["pitcher_id"].astype(str) == str(player_id)].copy()
+        players = pd.DataFrame(grouped)
+        players = players.sort_values(["team","role","name"]).reset_index(drop=True)
 
-        has_batter = not batter_data.empty
-        has_pitcher = not pitcher_data.empty
+        st.markdown("### 선수 찾기")
 
-        if not has_batter and not has_pitcher:
-            st.info("이 선수의 분석 데이터가 없습니다.")
+        # 이름 검색은 구단/구분 필터와 독립적으로 작동합니다.
+        search_name = st.text_input(
+            "🔍 이름 검색",
+            placeholder="선수 이름을 입력하세요"
+        ).strip()
 
-        if has_batter:
-            st.markdown("### 타자 분석")
-            d = batter_data
+        f1, f2 = st.columns(2)
+        teams = ["전체"] + [t for t in ["KT","LG","삼성","두산","KIA","NC","SSG","롯데","키움","한화"] if t in set(players["team"])]
+        with f1:
+            team_filter = st.selectbox("구단", teams)
+        with f2:
+            role_filter = st.selectbox("구분", ["전체","투수","타자"])
 
-            a,b,c = st.columns(3)
-            a.metric("본 투구", len(d))
-            b.metric("경기", d.game_id.nunique())
-            c.metric(
-                "상대 투구 평균 구속",
-                f"{d.speed.dropna().mean():.1f} km/h" if d.speed.notna().any() else "-"
+        # 검색어가 있으면 구단/구분을 선택하지 않아도 전체 선수에서 바로 검색
+        if search_name:
+            filtered = players[
+                players["name"].str.contains(search_name, case=False, na=False)
+            ].copy()
+        else:
+            filtered = players.copy()
+            if team_filter != "전체":
+                filtered = filtered[filtered["team"] == team_filter]
+            if role_filter == "투수":
+                filtered = filtered[filtered["role"].isin(["투수","투타"])]
+            elif role_filter == "타자":
+                filtered = filtered[filtered["role"].isin(["타자","투타"])]
+
+        st.caption(f"선수 {len(filtered):,}명")
+
+        if filtered.empty:
+            st.info("조건에 맞는 선수가 없습니다.")
+        else:
+            # 조건에 맞는 선수 목록을 모두 표시
+            list_view = filtered[["team","role","name"]].copy()
+            list_view.columns = ["구단","구분","선수"]
+            st.dataframe(
+                list_view,
+                hide_index=True,
+                use_container_width=True,
+                height=min(420, 38 * (len(list_view) + 1))
             )
 
-            d["행동"] = d.pitch_text.apply(action)
-            acts = d["행동"].value_counts().rename_axis("결과").reset_index(name="횟수")
-            if not acts.empty:
-                st.markdown("#### 투구 결과")
-                st.bar_chart(acts.set_index("결과")["횟수"])
+            # 분석할 선수는 목록에서 선택
+            label_map = {
+                f"{r['team']} · {r['role']} · {r['name']} ({r['id']})":
+                    (r["id"], r["name"])
+                for _, r in filtered.iterrows()
+            }
 
-            first = d[d.pitch_num == 1].copy()
-            if not first.empty:
-                first["결과"] = first.pitch_text.apply(action)
-                f = first["결과"].value_counts().rename_axis("결과").reset_index(name="횟수")
-                st.markdown("#### 초구")
-                st.dataframe(f, hide_index=True, use_container_width=True)
-
-            m = d.groupby("pitch_type",dropna=True).size().reset_index(name="투구수")
-            if not m.empty:
-                st.markdown("#### 상대 구종")
-                st.bar_chart(m.set_index("pitch_type")["투구수"])
-
-        if has_pitcher:
-            st.markdown("### 투수 분석")
-            d = pitcher_data
-
-            a,b,c = st.columns(3)
-            a.metric("투구", len(d))
-            b.metric("경기", d.game_id.nunique())
-            c.metric(
-                "평균 구속",
-                f"{d.speed.dropna().mean():.1f} km/h" if d.speed.notna().any() else "-"
+            selected = st.selectbox(
+                "분석할 선수 선택",
+                options=list(label_map.keys()),
+                index=None,
+                placeholder="선수를 선택하세요"
             )
 
-            mix = d.groupby("pitch_type",dropna=True).agg(
-                투구수=("pitch_id","count"),
-                평균구속=("speed","mean")
-            ).reset_index()
+            if selected is not None:
+                player_id, player_name = label_map[selected]
 
-            if not mix.empty:
-                mix["평균구속"] = mix["평균구속"].round(1)
-                st.markdown("#### 구종 구성")
-                st.bar_chart(mix.set_index("pitch_type")["투구수"])
-                st.dataframe(
-                    mix.sort_values("투구수",ascending=False),
-                    hide_index=True,
-                    use_container_width=True
-                )
+                fav_now = is_favorite(player_id)
+                fav_label = "★ 관심 선수 해제" if fav_now else "☆ 관심 선수 등록"
+                if st.button(fav_label, key=f"fav_{player_id}"):
+                    toggle_favorite(player_id, player_name)
+                    st.rerun()
 
-            loc = d[["plate_x","plate_y","pitch_type"]].dropna(subset=["plate_x","plate_y"])
-            if not loc.empty:
-                st.markdown("#### 투구 위치")
-                st.scatter_chart(loc, x="plate_x", y="plate_y", color="pitch_type")
+                batter_data = allp[
+                    allp["batter_id"].astype(str) == str(player_id)
+                ].copy()
+                pitcher_data = allp[
+                    allp["pitcher_id"].astype(str) == str(player_id)
+                ].copy()
+
+                has_batter = not batter_data.empty
+                has_pitcher = not pitcher_data.empty
+
+                if not has_batter and not has_pitcher:
+                    st.info("이 선수의 분석 데이터가 없습니다.")
+
+                if has_batter:
+                    st.markdown("### 타자 분석")
+                    d = batter_data
+
+                    a,b,c = st.columns(3)
+                    a.metric("본 투구", len(d))
+                    b.metric("경기", d.game_id.nunique())
+                    c.metric(
+                        "상대 투구 평균 구속",
+                        f"{d.speed.dropna().mean():.1f} km/h"
+                        if d.speed.notna().any() else "-"
+                    )
+
+                    d["행동"] = d.pitch_text.apply(action)
+                    acts = d["행동"].value_counts().rename_axis("결과").reset_index(name="횟수")
+                    if not acts.empty:
+                        st.markdown("#### 투구 결과")
+                        st.bar_chart(acts.set_index("결과")["횟수"])
+
+                    first = d[d.pitch_num == 1].copy()
+                    if not first.empty:
+                        first["결과"] = first.pitch_text.apply(action)
+                        f = first["결과"].value_counts().rename_axis("결과").reset_index(name="횟수")
+                        st.markdown("#### 초구")
+                        st.dataframe(f, hide_index=True, use_container_width=True)
+
+                    m = d.groupby("pitch_type",dropna=True).size().reset_index(name="투구수")
+                    if not m.empty:
+                        st.markdown("#### 상대 구종")
+                        st.bar_chart(m.set_index("pitch_type")["투구수"])
+
+                if has_pitcher:
+                    st.markdown("### 투수 분석")
+                    d = pitcher_data
+
+                    a,b,c = st.columns(3)
+                    a.metric("투구", len(d))
+                    b.metric("경기", d.game_id.nunique())
+                    c.metric(
+                        "평균 구속",
+                        f"{d.speed.dropna().mean():.1f} km/h"
+                        if d.speed.notna().any() else "-"
+                    )
+
+                    mix = d.groupby("pitch_type",dropna=True).agg(
+                        투구수=("pitch_id","count"),
+                        평균구속=("speed","mean")
+                    ).reset_index()
+
+                    if not mix.empty:
+                        mix["평균구속"] = mix["평균구속"].round(1)
+                        st.markdown("#### 구종 구성")
+                        st.bar_chart(mix.set_index("pitch_type")["투구수"])
+                        st.dataframe(
+                            mix.sort_values("투구수",ascending=False),
+                            hide_index=True,
+                            use_container_width=True
+                        )
+
+                    loc = d[["plate_x","plate_y","pitch_type"]].dropna(
+                        subset=["plate_x","plate_y"]
+                    )
+                    if not loc.empty:
+                        st.markdown("#### 투구 위치")
+                        st.scatter_chart(
+                            loc,
+                            x="plate_x",
+                            y="plate_y",
+                            color="pitch_type"
+                        )
