@@ -1,4 +1,5 @@
 
+
 import os, re, time, shutil, sqlite3
 from pathlib import Path
 from datetime import datetime
@@ -567,6 +568,47 @@ def all_games():
     g["demo_ready"] = 1
     return pd.concat([g[extra.columns], extra], ignore_index=True)
 
+
+def source_pitches():
+    """Parquet 기본 데이터와 NAVER 추가 데이터를 분리해서 반환."""
+    base_p, _ = base_data()
+    extra = extra_pitches()
+
+    if not base_p.empty and not extra.empty:
+        extra = extra[
+            ~extra["game_id"].astype(str).isin(set(base_p["game_id"].astype(str)))
+        ].copy()
+
+    return base_p.copy(), extra.copy()
+
+def source_games():
+    """Parquet 기본 경기와 NAVER 추가 경기를 분리해서 반환."""
+    _, base_g = base_data()
+    extra = extra_games()
+
+    if not base_g.empty and not extra.empty:
+        extra = extra[
+            ~extra["game_id"].astype(str).isin(set(base_g["game_id"].astype(str)))
+        ].copy()
+
+    return base_g.copy(), extra.copy()
+
+def analysis_period(df):
+    """실제 분석에 사용된 데이터의 최소/최대 경기일을 자동 계산."""
+    if df is None or df.empty or "game_date" not in df.columns:
+        return None
+
+    dates = pd.to_datetime(df["game_date"], errors="coerce").dropna()
+    if dates.empty:
+        return None
+
+    start = dates.min().strftime("%Y.%m.%d")
+    end = dates.max().strftime("%Y.%m.%d")
+    return start if start == end else f"{start} ~ {end}"
+
+def source_caption(text):
+    st.caption(text)
+
 def combined_counts():
     g = all_games()
     p = all_pitches()
@@ -926,6 +968,9 @@ elif nav == "팀":
 
     allp = all_pitches()
     allg = all_games()
+    base_p, naver_p = source_pitches()
+    base_g, naver_g = source_games()
+
     present = sorted(set(allg.away_team.dropna()).union(set(allg.home_team.dropna()))) if not allg.empty else []
     priority = [t for t in PRIORITY_TEAMS if t in present]
     options = priority + [t for t in present if t not in priority]
@@ -934,16 +979,62 @@ elif nav == "팀":
         st.info("데이터를 먼저 추가해 주세요.")
     else:
         team = st.selectbox("팀 선택", options)
-        n_games = allg[(allg["away_team"] == team) | (allg["home_team"] == team)]["game_id"].nunique()
+
+        # -----------------------------
+        # 공개 Play-by-Play 기본 데이터
+        # -----------------------------
+        st.markdown("### Play-by-Play 기본 데이터")
+        bp_team_games = base_g[
+            (base_g["away_team"] == team) | (base_g["home_team"] == team)
+        ].copy() if not base_g.empty else pd.DataFrame()
+
+        bp_thrown = base_p[base_p["defense_team"] == team].copy() if not base_p.empty else pd.DataFrame()
+        bp_seen = base_p[base_p["offense_team"] == team].copy() if not base_p.empty else pd.DataFrame()
+
+        a,b,c = st.columns(3)
+        a.metric("경기", bp_team_games["game_id"].nunique() if not bp_team_games.empty else 0)
+        b.metric("투수진 투구", len(bp_thrown))
+        c.metric("타선이 본 투구", len(bp_seen))
+        source_caption("출처: 공개 Play-by-Play 데이터셋")
+
+        # -----------------------------
+        # NAVER 추가 데이터
+        # -----------------------------
+        st.markdown("### NAVER 추가 데이터")
+        nv_team_games = naver_g[
+            (naver_g["away_team"] == team) | (naver_g["home_team"] == team)
+        ].copy() if not naver_g.empty else pd.DataFrame()
+
+        nv_thrown = naver_p[naver_p["defense_team"] == team].copy() if not naver_p.empty else pd.DataFrame()
+        nv_seen = naver_p[naver_p["offense_team"] == team].copy() if not naver_p.empty else pd.DataFrame()
+
+        a,b,c = st.columns(3)
+        a.metric("추가 경기", nv_team_games["game_id"].nunique() if not nv_team_games.empty else 0)
+        b.metric("추가 투구", len(nv_thrown))
+        c.metric("추가 상대 투구", len(nv_seen))
+        source_caption("출처: NAVER Sports 문자중계")
+
+        # -----------------------------
+        # DATA DUGOUT 통합 분석
+        # -----------------------------
+        st.markdown("### DATA DUGOUT 팀 분석")
+        team_games = allg[
+            (allg["away_team"] == team) | (allg["home_team"] == team)
+        ].copy()
         thrown = allp[allp["defense_team"] == team].copy() if not allp.empty else pd.DataFrame()
         seen = allp[allp["offense_team"] == team].copy() if not allp.empty else pd.DataFrame()
 
+        period = analysis_period(team_games)
+        if period:
+            st.caption(f"분석 기간: {period}")
+        st.caption("분석 데이터: 공개 Play-by-Play 데이터셋 + NAVER Sports")
+
         a,b,c = st.columns(3)
-        a.metric("경기", int(n_games))
+        a.metric("통합 경기", team_games["game_id"].nunique() if not team_games.empty else 0)
         b.metric("투수진 투구", len(thrown))
         c.metric("타선이 본 투구", len(seen))
 
-        st.markdown("### 투수진 구종 구성")
+        st.markdown("#### 투수진 구종 구성")
         if thrown.empty:
             st.info("데이터가 없습니다.")
         else:
@@ -953,13 +1044,25 @@ elif nav == "팀":
             ).reset_index()
             mix["평균구속"] = mix["평균구속"].round(1)
             st.bar_chart(mix.set_index("pitch_type")["투구수"])
-            st.dataframe(mix.sort_values("투구수",ascending=False), hide_index=True, use_container_width=True)
+            st.dataframe(
+                mix.sort_values("투구수",ascending=False),
+                hide_index=True,
+                use_container_width=True
+            )
 
-        st.markdown("### 타선이 상대해 온 구종")
-        if not seen.empty:
+        st.markdown("#### 타선이 상대해 온 구종")
+        if seen.empty:
+            st.info("데이터가 없습니다.")
+        else:
             mix2 = seen.groupby("pitch_type", dropna=True).size().reset_index(name="투구수")
             st.bar_chart(mix2.set_index("pitch_type")["투구수"])
-            st.dataframe(mix2.sort_values("투구수",ascending=False), hide_index=True, use_container_width=True)
+            st.dataframe(
+                mix2.sort_values("투구수",ascending=False),
+                hide_index=True,
+                use_container_width=True
+            )
+
+        st.caption("KBO 공식 팀 기록은 KBO 팀 기록 데이터를 추가한 뒤 이 페이지에 연결합니다.")
 
 elif nav == "선수":
     allp = all_pitches()
@@ -1174,6 +1277,7 @@ elif nav == "선수":
                 if kbo_hitter is not None or kbo_pitcher is not None:
                     st.markdown("### KBO 공식 기록")
                     st.caption("2026 KBO 정규시즌")
+                    st.caption("출처: KBO 공식 홈페이지")
 
                     if kbo_hitter is not None:
                         st.markdown("#### 타자 공식 기록")
@@ -1223,12 +1327,54 @@ elif nav == "선수":
                 has_batter = not batter_data.empty
                 has_pitcher = not pitcher_data.empty
 
+                base_player_p, naver_player_p = source_pitches()
+
+                bp_batter = base_player_p[
+                    base_player_p["batter_id"].astype(str) == str(player_id)
+                ].copy() if not base_player_p.empty else pd.DataFrame()
+                bp_pitcher = base_player_p[
+                    base_player_p["pitcher_id"].astype(str) == str(player_id)
+                ].copy() if not base_player_p.empty else pd.DataFrame()
+
+                nv_batter = naver_player_p[
+                    naver_player_p["batter_id"].astype(str) == str(player_id)
+                ].copy() if not naver_player_p.empty else pd.DataFrame()
+                nv_pitcher = naver_player_p[
+                    naver_player_p["pitcher_id"].astype(str) == str(player_id)
+                ].copy() if not naver_player_p.empty else pd.DataFrame()
+
+                st.markdown("### Play-by-Play 기본 데이터")
+                p1, p2, p3 = st.columns(3)
+                bp_games = pd.concat([
+                    bp_batter[["game_id"]] if not bp_batter.empty else pd.DataFrame(columns=["game_id"]),
+                    bp_pitcher[["game_id"]] if not bp_pitcher.empty else pd.DataFrame(columns=["game_id"])
+                ], ignore_index=True)
+                p1.metric("경기", bp_games["game_id"].nunique() if not bp_games.empty else 0)
+                p2.metric("타자로 본 투구", len(bp_batter))
+                p3.metric("투수로 던진 투구", len(bp_pitcher))
+                st.caption("출처: 공개 Play-by-Play 데이터셋")
+
+                st.markdown("### NAVER 추가 데이터")
+                n1, n2, n3 = st.columns(3)
+                nv_games = pd.concat([
+                    nv_batter[["game_id"]] if not nv_batter.empty else pd.DataFrame(columns=["game_id"]),
+                    nv_pitcher[["game_id"]] if not nv_pitcher.empty else pd.DataFrame(columns=["game_id"])
+                ], ignore_index=True)
+                n1.metric("추가 경기", nv_games["game_id"].nunique() if not nv_games.empty else 0)
+                n2.metric("타자로 본 추가 투구", len(nv_batter))
+                n3.metric("투수로 던진 추가 투구", len(nv_pitcher))
+                st.caption("출처: NAVER Sports 문자중계")
+
                 if not has_batter and not has_pitcher:
                     st.info("이 선수의 분석 데이터가 없습니다.")
 
                 if has_batter:
                     st.markdown("### DATA DUGOUT 타자 분석")
                     d = batter_data
+                    period = analysis_period(d)
+                    if period:
+                        st.caption(f"분석 기간: {period}")
+                    st.caption("분석 데이터: 공개 Play-by-Play 데이터셋 + NAVER Sports")
 
                     a,b,c = st.columns(3)
                     a.metric("본 투구", len(d))
@@ -1260,6 +1406,10 @@ elif nav == "선수":
                 if has_pitcher:
                     st.markdown("### DATA DUGOUT 투수 분석")
                     d = pitcher_data
+                    period = analysis_period(d)
+                    if period:
+                        st.caption(f"분석 기간: {period}")
+                    st.caption("분석 데이터: 공개 Play-by-Play 데이터셋 + NAVER Sports")
 
                     a,b,c = st.columns(3)
                     a.metric("투구", len(d))
