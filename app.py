@@ -1,5 +1,4 @@
 
-
 import os, re, time, shutil, sqlite3
 from pathlib import Path
 from datetime import datetime
@@ -108,6 +107,51 @@ def metric_value(row, key):
             return f"{int(v)}"
         return f"{v:.3f}".rstrip("0").rstrip(".")
     return str(v)
+
+
+def kbo_avg_value(row, key="AVG"):
+    """KBO 타율은 공식 표기처럼 항상 소수점 셋째 자리까지 표시."""
+    if row is None or key not in row.index:
+        return "-"
+    v = row[key]
+    if pd.isna(v):
+        return "-"
+    try:
+        return f"{float(v):.3f}"
+    except Exception:
+        return str(v)
+
+def kbo_ip_value(row, key="IP"):
+    """KBO 이닝의 .333/.667 값을 야구식 1/3, 2/3 표기로 표시."""
+    if row is None or key not in row.index:
+        return "-"
+    v = row[key]
+    if pd.isna(v):
+        return "-"
+
+    # Excel에서 문자열(예: '111 1/3')로 들어온 경우 그대로 사용
+    if isinstance(v, str):
+        s = v.strip()
+        if s:
+            return s
+        return "-"
+
+    try:
+        x = float(v)
+    except Exception:
+        return str(v)
+
+    whole = int(x)
+    frac = x - whole
+
+    if abs(frac) < 0.01:
+        return str(whole)
+    if abs(frac - 1/3) < 0.03 or abs(frac - 0.333) < 0.03:
+        return f"{whole} 1/3"
+    if abs(frac - 2/3) < 0.03 or abs(frac - 0.667) < 0.03:
+        return f"{whole} 2/3"
+
+    return f"{x:.3f}".rstrip("0").rstrip(".")
 
 def db():
     c = sqlite3.connect(DB_PATH, timeout=30)
@@ -1134,7 +1178,7 @@ elif nav == "선수":
                     if kbo_hitter is not None:
                         st.markdown("#### 타자 공식 기록")
                         r1 = st.columns(6)
-                        r1[0].metric("AVG", metric_value(kbo_hitter, "AVG"))
+                        r1[0].metric("AVG", kbo_avg_value(kbo_hitter, "AVG"))
                         r1[1].metric("경기", metric_value(kbo_hitter, "G"))
                         r1[2].metric("타석", metric_value(kbo_hitter, "PA"))
                         r1[3].metric("안타", metric_value(kbo_hitter, "H"))
@@ -1156,7 +1200,7 @@ elif nav == "선수":
                         r1[1].metric("경기", metric_value(kbo_pitcher, "G"))
                         r1[2].metric("승", metric_value(kbo_pitcher, "W"))
                         r1[3].metric("패", metric_value(kbo_pitcher, "L"))
-                        r1[4].metric("이닝", metric_value(kbo_pitcher, "IP"))
+                        r1[4].metric("이닝", kbo_ip_value(kbo_pitcher, "IP"))
                         r1[5].metric("탈삼진", metric_value(kbo_pitcher, "SO"))
 
                         r2 = st.columns(6)
