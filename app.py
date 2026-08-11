@@ -848,50 +848,73 @@ elif nav == "선수":
             toggle_favorite(player_id, player_name)
             st.rerun()
 
-        role = st.radio("", ["타자","투수"], horizontal=True, label_visibility="collapsed")
+        batter_data = allp[allp["batter_id"].astype(str) == str(player_id)].copy()
+        pitcher_data = allp[allp["pitcher_id"].astype(str) == str(player_id)].copy()
 
-        if role == "타자":
-            d = allp[allp["batter_id"].astype(str) == str(player_id)].copy()
+        has_batter = not batter_data.empty
+        has_pitcher = not pitcher_data.empty
+
+        if not has_batter and not has_pitcher:
+            st.info("이 선수의 분석 데이터가 없습니다.")
+
+        if has_batter:
+            st.markdown("### 타자 분석")
+            d = batter_data
+
             a,b,c = st.columns(3)
             a.metric("본 투구", len(d))
-            b.metric("경기", d.game_id.nunique() if not d.empty else 0)
-            c.metric("평균 구속", f"{d.speed.dropna().mean():.1f} km/h" if not d.empty and d.speed.notna().any() else "-")
+            b.metric("경기", d.game_id.nunique())
+            c.metric(
+                "상대 투구 평균 구속",
+                f"{d.speed.dropna().mean():.1f} km/h" if d.speed.notna().any() else "-"
+            )
 
-            if not d.empty:
-                d["행동"] = d.pitch_text.apply(action)
-                acts = d["행동"].value_counts().rename_axis("결과").reset_index(name="횟수")
-                st.markdown("### 투구 결과")
+            d["행동"] = d.pitch_text.apply(action)
+            acts = d["행동"].value_counts().rename_axis("결과").reset_index(name="횟수")
+            if not acts.empty:
+                st.markdown("#### 투구 결과")
                 st.bar_chart(acts.set_index("결과")["횟수"])
 
-                first = d[d.pitch_num == 1].copy()
-                if not first.empty:
-                    first["결과"] = first.pitch_text.apply(action)
-                    f = first["결과"].value_counts().rename_axis("결과").reset_index(name="횟수")
-                    st.markdown("### 초구")
-                    st.dataframe(f, hide_index=True, use_container_width=True)
+            first = d[d.pitch_num == 1].copy()
+            if not first.empty:
+                first["결과"] = first.pitch_text.apply(action)
+                f = first["결과"].value_counts().rename_axis("결과").reset_index(name="횟수")
+                st.markdown("#### 초구")
+                st.dataframe(f, hide_index=True, use_container_width=True)
 
-                st.markdown("### 상대 구종")
-                m = d.groupby("pitch_type",dropna=True).size().reset_index(name="투구수")
+            m = d.groupby("pitch_type",dropna=True).size().reset_index(name="투구수")
+            if not m.empty:
+                st.markdown("#### 상대 구종")
                 st.bar_chart(m.set_index("pitch_type")["투구수"])
 
-        else:
-            d = allp[allp["pitcher_id"].astype(str) == str(player_id)].copy()
+        if has_pitcher:
+            st.markdown("### 투수 분석")
+            d = pitcher_data
+
             a,b,c = st.columns(3)
             a.metric("투구", len(d))
-            b.metric("경기", d.game_id.nunique() if not d.empty else 0)
-            c.metric("평균 구속", f"{d.speed.dropna().mean():.1f} km/h" if not d.empty and d.speed.notna().any() else "-")
+            b.metric("경기", d.game_id.nunique())
+            c.metric(
+                "평균 구속",
+                f"{d.speed.dropna().mean():.1f} km/h" if d.speed.notna().any() else "-"
+            )
 
-            if not d.empty:
-                mix = d.groupby("pitch_type",dropna=True).agg(
-                    투구수=("pitch_id","count"),
-                    평균구속=("speed","mean")
-                ).reset_index()
+            mix = d.groupby("pitch_type",dropna=True).agg(
+                투구수=("pitch_id","count"),
+                평균구속=("speed","mean")
+            ).reset_index()
+
+            if not mix.empty:
                 mix["평균구속"] = mix["평균구속"].round(1)
-                st.markdown("### 구종 구성")
+                st.markdown("#### 구종 구성")
                 st.bar_chart(mix.set_index("pitch_type")["투구수"])
-                st.dataframe(mix.sort_values("투구수",ascending=False), hide_index=True, use_container_width=True)
+                st.dataframe(
+                    mix.sort_values("투구수",ascending=False),
+                    hide_index=True,
+                    use_container_width=True
+                )
 
-                st.markdown("### 투구 위치")
-                loc = d[["plate_x","plate_y","pitch_type"]].dropna(subset=["plate_x","plate_y"])
-                if not loc.empty:
-                    st.scatter_chart(loc, x="plate_x", y="plate_y", color="pitch_type")
+            loc = d[["plate_x","plate_y","pitch_type"]].dropna(subset=["plate_x","plate_y"])
+            if not loc.empty:
+                st.markdown("#### 투구 위치")
+                st.scatter_chart(loc, x="plate_x", y="plate_y", color="pitch_type")
