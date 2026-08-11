@@ -918,7 +918,6 @@ elif nav == "팀":
             st.dataframe(mix2.sort_values("투구수",ascending=False), hide_index=True, use_container_width=True)
 
 elif nav == "선수":
-    st.markdown("## 선수")
     allp = all_pitches()
 
     if allp.empty:
@@ -1005,6 +1004,8 @@ elif nav == "선수":
             placeholder="선수 이름을 입력하세요"
         ).strip()
 
+        st.caption("이름으로 바로 검색하거나, 아래 필터로 선수 목록을 좁혀볼 수 있습니다.")
+
         f1, f2 = st.columns(2)
         teams = ["전체"] + [t for t in ["KT","LG","삼성","두산","KIA","NC","SSG","롯데","키움","한화"] if t in set(players["team"])]
         with f1:
@@ -1026,20 +1027,22 @@ elif nav == "선수":
             elif role_filter == "타자":
                 filtered = filtered[filtered["role"].isin(["타자","투타"])]
 
-        st.caption(f"선수 {len(filtered):,}명")
-
         if filtered.empty:
             st.info("조건에 맞는 선수가 없습니다.")
         else:
-            # 조건에 맞는 선수 목록을 모두 표시
-            list_view = filtered[["team","role","name"]].copy()
-            list_view.columns = ["구단","구분","선수"]
-            st.dataframe(
-                list_view,
-                hide_index=True,
-                use_container_width=True,
-                height=min(420, 38 * (len(list_view) + 1))
-            )
+            # 이름 검색 결과가 정확히 1명이면 목록/인원수 표시는 생략하고 바로 분석으로 이동
+            direct_search = bool(search_name and len(filtered) == 1)
+
+            if not direct_search:
+                st.caption(f"선수 {len(filtered):,}명")
+                list_view = filtered[["team","role","name"]].copy()
+                list_view.columns = ["구단","구분","선수"]
+                st.dataframe(
+                    list_view,
+                    hide_index=True,
+                    use_container_width=True,
+                    height=min(420, 38 * (len(list_view) + 1))
+                )
 
             # 이름 검색 결과가 1명이면 추가 선택 없이 바로 분석 표시
             # 구단/구분 필터로 목록을 보는 경우에는 목록에서 선수를 선택
@@ -1102,6 +1105,11 @@ elif nav == "선수":
                         player_role = picked.iloc[0]["role"]
 
             if player_id is not None:
+                st.markdown(f"### {player_name}")
+                player_meta = " · ".join([x for x in [player_team, player_role] if x])
+                if player_meta:
+                    st.caption(player_meta)
+
                 fav_now = is_favorite(player_id)
                 fav_label = "★ 관심 선수 해제" if fav_now else "☆ 관심 선수 등록"
                 if st.button(fav_label, key=f"fav_{player_id}"):
@@ -1121,10 +1129,7 @@ elif nav == "선수":
 
                 if kbo_hitter is not None or kbo_pitcher is not None:
                     st.markdown("### KBO 공식 기록")
-                    if player_team:
-                        st.caption(f"{player_name} · {player_team} · 2026 KBO 정규시즌")
-                    else:
-                        st.caption(f"{player_name} · 2026 KBO 정규시즌")
+                    st.caption("2026 KBO 정규시즌")
 
                     if kbo_hitter is not None:
                         st.markdown("#### 타자 공식 기록")
