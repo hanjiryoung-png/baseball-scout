@@ -646,6 +646,32 @@ def data_source_status():
     }
 
 
+def overview_counts():
+    """홈 요약 수치. 선수 수는 KBO + NAVER + Play-by-Play의 선수명을 합쳐 중복 제거합니다.
+    경기 수는 경기 ID가 존재하는 NAVER + Play-by-Play 자료의 중복 제거 합계입니다.
+    KBO 공식 기록은 시즌 누적 선수 통계라 경기별 ID가 없어 경기 수에는 중복 없이 합산할 수 없습니다.
+    """
+    g = all_games()
+    p = all_pitches()
+    kbo_h, kbo_p = kbo_records()
+
+    names = []
+    if p is not None and not p.empty:
+        for col in ("pitcher_name", "batter_name"):
+            if col in p.columns:
+                s = p[col].dropna().astype(str).str.strip()
+                names.extend(s[(s != "") & (s != "nan")].tolist())
+    for df in (kbo_h, kbo_p):
+        if df is not None and not df.empty and "선수명" in df.columns:
+            s = df["선수명"].dropna().astype(str).str.strip()
+            names.extend(s[(s != "") & (s != "nan")].tolist())
+
+    return {
+        "games": int(g["game_id"].nunique()) if g is not None and not g.empty else 0,
+        "players": len(set(names)),
+    }
+
+
 def analysis_header(title, period=None, source_note=None):
     html = (
         '<div class="dugout-analysis-head">'
@@ -904,33 +930,11 @@ if not games.empty:
 counts = current_counts()
 
 if nav == "홈":
-    allg = all_games()
-    status = data_source_status()
-    period = analysis_period(allg)
+    summary = overview_counts()
 
-    st.markdown(
-        '''<div class="home-intro">
-            <div class="home-intro-title">흩어진 야구 자료를 한곳에서 검색하고 분석합니다.</div>
-            <div class="home-intro-text">KBO 공식 기록, NAVER Sports 문자중계, 공개 Play-by-Play 자료를 연결해 팀과 선수 단위로 확인하고 DATA DUGOUT 분석으로 재구성합니다.</div>
-        </div>''', unsafe_allow_html=True)
-
-    h1,h2,h3 = st.columns(3)
-    h1.metric("분석 경기", int(allg["game_id"].nunique()) if not allg.empty else 0)
-    h2.metric("등록 선수", int(counts.players))
-    h3.metric("분석 기간", period or "-")
-
-    st.markdown("### 데이터 연결 상태")
-    s1,s2,s3 = st.columns(3)
-    s1.metric("KBO 공식 기록", "연결됨" if status["kbo"] else "미연결")
-    s2.metric("NAVER 최신 자료", f"{status['naver_games']}경기")
-    s3.metric("Play-by-Play 자료", f"{status['base_games']}경기")
-
-    st.markdown("### 바로가기")
-    b1,b2 = st.columns(2)
-    with b1:
-        st.button("팀 분석 보기", use_container_width=True, on_click=go_to, args=("팀",))
-    with b2:
-        st.button("선수 분석 보기", use_container_width=True, on_click=go_to, args=("선수",))
+    h1,h2 = st.columns(2)
+    h1.metric("분석 경기", summary["games"])
+    h2.metric("등록 선수", summary["players"])
 
     favs = favorite_players()
     if not favs.empty:
@@ -938,18 +942,23 @@ if nav == "홈":
         cols = st.columns(min(4, len(favs)))
         for pos, (_, row) in enumerate(favs.iterrows()):
             with cols[pos % len(cols)]:
-                st.button(f"★ {row['player_name']}", key=f"home_fav_{row['player_id']}", use_container_width=True,
-                          on_click=go_to, args=("선수", row["player_name"]))
+                st.button(
+                    f"★ {row['player_name']}",
+                    key=f"home_fav_{row['player_id']}",
+                    use_container_width=True,
+                    on_click=go_to,
+                    args=("선수", row["player_name"])
+                )
 
 elif nav == "데이터":
     st.markdown("## 데이터")
-    st.caption("최신 경기 자료 추가와 Play-by-Play 자료 관리를 한 화면에서 구분해 처리합니다.")
 
-    kbo_h, kbo_p = kbo_records()
-    if (not kbo_h.empty) or (not kbo_p.empty):
-        st.success("KBO 공식 기록 · 2026 KBO 정규시즌 · 연결됨")
-    else:
-        st.warning("KBO 공식 기록 파일을 확인해 주세요.")
+    status = data_source_status()
+    st.markdown("### 데이터 연결 상태")
+    s1,s2,s3 = st.columns(3)
+    s1.metric("KBO 공식 기록", "연결됨" if status["kbo"] else "미연결")
+    s2.metric("NAVER 최신 자료", f"{status['naver_games']}경기")
+    s3.metric("Play-by-Play 자료", f"{status['base_games']}경기")
 
     st.markdown("### ① NAVER 최신 자료 추가")
     st.caption("출처: NAVER Sports 문자중계")
@@ -1011,7 +1020,7 @@ elif nav == "팀":
         team_games=allg[(allg["away_team"]==team)|(allg["home_team"]==team)].copy()
         thrown=allp[allp["defense_team"]==team].copy() if not allp.empty else pd.DataFrame()
         seen=allp[allp["offense_team"]==team].copy() if not allp.empty else pd.DataFrame()
-        analysis_header(f"{team} 팀 분석",analysis_period(team_games),"현재 반영 자료: NAVER Sports + 공개 Play-by-Play 자료 · KBO 팀 공식 기록은 연결 전")
+        analysis_header(f"{team} 팀 분석")
         with st.container(border=True):
             top_throw,_,top_throw_share=top_pitch_info(thrown); top_seen,_,top_seen_share=top_pitch_info(seen)
             a,b,c,d=st.columns(4)
@@ -1059,19 +1068,37 @@ elif nav == "선수":
             if team_filter!="전체": filtered=filtered[filtered["team"]==team_filter]
             if role_filter=="투수": filtered=filtered[filtered["role"].isin(["투수","투타"])]
             elif role_filter=="타자": filtered=filtered[filtered["role"].isin(["타자","투타"])]
-        if filtered.empty: st.info("조건에 맞는 선수가 없습니다.")
+        if filtered.empty:
+            st.info("조건에 맞는 선수가 없습니다.")
         else:
-            direct=bool(search_name and len(filtered)==1)
-            if not direct:
-                st.caption(f"선수 {len(filtered):,}명"); lv=filtered[["team","role","name"]].copy(); lv.columns=["구단","구분","선수"]; st.dataframe(lv,hide_index=True,use_container_width=True,height=min(420,38*(len(lv)+1)))
+            direct = bool(search_name and len(filtered) == 1)
+            filter_used = bool(search_name or team_filter != "전체" or role_filter != "전체")
+
+            # 첫 화면에서는 546명 전체 목록을 노출하지 않습니다.
+            # 이름 검색 또는 구단/구분 필터를 사용했을 때만 결과를 보여줍니다.
+            if filter_used and not direct:
+                st.caption(f"선수 {len(filtered):,}명")
+                lv = filtered[["team","role","name"]].copy()
+                lv.columns = ["구단","구분","선수"]
+                st.dataframe(
+                    lv,
+                    hide_index=True,
+                    use_container_width=True,
+                    height=min(420, 38 * (len(lv) + 1))
+                )
+
             player_id=player_name=player_team=player_role=None
             if direct:
-                only=filtered.iloc[0]; player_id,player_name,player_team,player_role=str(only["id"]),only["name"],only["team"],only["role"]
-            else:
-                lm={f"{r['team']} · {r['role']} · {r['name']} ({r['id']})":(str(r['id']),r['name']) for _,r in filtered.iterrows()}; sel=st.selectbox("분석할 선수 선택",list(lm.keys()),index=None,placeholder="선수를 선택하세요")
+                only=filtered.iloc[0]
+                player_id,player_name,player_team,player_role = str(only["id"]),only["name"],only["team"],only["role"]
+            elif filter_used:
+                lm={f"{r['team']} · {r['role']} · {r['name']} ({r['id']})":(str(r['id']),r['name']) for _,r in filtered.iterrows()}
+                sel=st.selectbox("분석할 선수 선택",list(lm.keys()),index=None,placeholder="선수를 선택하세요")
                 if sel is not None:
-                    player_id,player_name=lm[sel]; picked=filtered[(filtered["id"].astype(str)==str(player_id))&(filtered["name"]==player_name)]
-                    if not picked.empty: player_team,player_role=picked.iloc[0]["team"],picked.iloc[0]["role"]
+                    player_id,player_name=lm[sel]
+                    picked=filtered[(filtered["id"].astype(str)==str(player_id))&(filtered["name"]==player_name)]
+                    if not picked.empty:
+                        player_team,player_role=picked.iloc[0]["team"],picked.iloc[0]["role"]
             if player_id is not None:
                 st.markdown(f"### {player_name}"); st.caption(" · ".join([x for x in [player_team,player_role] if x])); fav_now=is_favorite(player_id)
                 if st.button("★ 관심 선수 해제" if fav_now else "☆ 관심 선수 등록",key=f"fav_{player_id}"): toggle_favorite(player_id,player_name); st.rerun()
