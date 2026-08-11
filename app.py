@@ -1,5 +1,4 @@
 
-
 import os, re, time, shutil, sqlite3
 from pathlib import Path
 from datetime import datetime
@@ -20,11 +19,94 @@ SNAPSHOT_PATH = DATA_DIR / "presentation_snapshot.db"
 REPO_BASE_PARQUET = APP_DIR / "kbo_pbp_2026.parquet"
 UPLOADED_BASE_PARQUET = DATA_DIR / "kbo_pbp_2026.parquet"
 
+# KBO 공식 시즌 기록 Excel
+REPO_KBO_RECORDS = APP_DIR / "kbo_2026_records.xlsx"
+
 TEAM = {
     "KT":"KT","LG":"LG","SS":"삼성","OB":"두산","HT":"KIA",
     "SK":"SSG","WO":"키움","LT":"롯데","NC":"NC","HH":"한화"
 }
 PRIORITY_TEAMS = ["KT","LG","삼성","두산","KIA"]
+
+
+@st.cache_data(show_spinner=False)
+def load_kbo_records(path_text, modified_ns):
+    path = Path(path_text)
+
+    sheets = pd.read_excel(
+        path,
+        sheet_name=["타자_기본","타자_세부","투수_기본","투수_세부"],
+        engine="openpyxl"
+    )
+
+    def clean(df):
+        df = df.copy()
+        df.columns = [str(c).strip() for c in df.columns]
+        for c in ["선수명","팀명"]:
+            if c in df.columns:
+                df[c] = df[c].astype(str).str.strip()
+        return df
+
+    hb = clean(sheets["타자_기본"])
+    hd = clean(sheets["타자_세부"])
+    pb = clean(sheets["투수_기본"])
+    pd2 = clean(sheets["투수_세부"])
+
+    # 기본기록 + 세부기록을 선수명/팀명 기준으로 결합
+    hitter = hb.merge(
+        hd,
+        on=["선수명","팀명"],
+        how="outer",
+        suffixes=("","_세부")
+    )
+
+    pitcher = pb.merge(
+        pd2,
+        on=["선수명","팀명"],
+        how="outer",
+        suffixes=("","_세부")
+    )
+
+    return hitter, pitcher
+
+def kbo_records():
+    if not REPO_KBO_RECORDS.exists():
+        return pd.DataFrame(), pd.DataFrame()
+    try:
+        stat = REPO_KBO_RECORDS.stat()
+        return load_kbo_records(str(REPO_KBO_RECORDS), stat.st_mtime_ns)
+    except Exception:
+        return pd.DataFrame(), pd.DataFrame()
+
+def find_kbo_player(df, player_name, team_name):
+    if df.empty:
+        return None
+
+    d = df[df["선수명"].astype(str).str.strip() == str(player_name).strip()].copy()
+
+    # 이름이 같고 팀도 일치하면 우선 사용
+    if team_name and "팀명" in d.columns:
+        same_team = d[d["팀명"].astype(str).str.strip() == str(team_name).strip()]
+        if not same_team.empty:
+            return same_team.iloc[0]
+
+    # 이름이 유일하면 팀 매칭이 안 되어도 사용
+    if len(d) == 1:
+        return d.iloc[0]
+
+    return None
+
+def metric_value(row, key):
+    if row is None or key not in row.index:
+        return "-"
+    v = row[key]
+    if pd.isna(v):
+        return "-"
+    if isinstance(v, float):
+        if v.is_integer():
+            return f"{int(v)}"
+        return f"{v:.3f}".rstrip("0").rstrip(".")
+    return str(v)
 
 def db():
     c = sqlite3.connect(DB_PATH, timeout=30)
@@ -947,11 +1029,15 @@ elif nav == "선수":
             # 구단/구분 필터로 목록을 보는 경우에는 목록에서 선수를 선택
             player_id = None
             player_name = None
+            player_team = None
+            player_role = None
 
             if search_name and len(filtered) == 1:
                 only = filtered.iloc[0]
                 player_id = str(only["id"])
                 player_name = only["name"]
+                player_team = only["team"]
+                player_role = only["role"]
 
             elif search_name and len(filtered) > 1:
                 # 동명이인 또는 부분검색 결과가 여러 명일 때만 선택창 표시
@@ -968,6 +1054,13 @@ elif nav == "선수":
                 )
                 if selected is not None:
                     player_id, player_name = label_map[selected]
+                    picked = filtered[
+                        (filtered["id"].astype(str) == str(player_id)) &
+                        (filtered["name"] == player_name)
+                    ]
+                    if not picked.empty:
+                        player_team = picked.iloc[0]["team"]
+                        player_role = picked.iloc[0]["role"]
 
             else:
                 # 검색어 없이 구단/구분으로 목록을 보는 경우에만 선택창 사용
@@ -984,6 +1077,13 @@ elif nav == "선수":
                 )
                 if selected is not None:
                     player_id, player_name = label_map[selected]
+                    picked = filtered[
+                        (filtered["id"].astype(str) == str(player_id)) &
+                        (filtered["name"] == player_name)
+                    ]
+                    if not picked.empty:
+                        player_team = picked.iloc[0]["team"]
+                        player_role = picked.iloc[0]["role"]
 
             if player_id is not None:
                 fav_now = is_favorite(player_id)
@@ -991,6 +1091,62 @@ elif nav == "선수":
                 if st.button(fav_label, key=f"fav_{player_id}"):
                     toggle_favorite(player_id, player_name)
                     st.rerun()
+
+                # -----------------------------
+                # KBO 공식 시즌 기록
+                # -----------------------------
+                kbo_hitters, kbo_pitchers = kbo_records()
+                kbo_hitter = find_kbo_player(
+                    kbo_hitters, player_name, player_team
+                )
+                kbo_pitcher = find_kbo_player(
+                    kbo_pitchers, player_name, player_team
+                )
+
+                if kbo_hitter is not None or kbo_pitcher is not None:
+                    st.markdown("### KBO 공식 기록")
+                    if player_team:
+                        st.caption(f"{player_name} · {player_team} · 2026 KBO 정규시즌")
+                    else:
+                        st.caption(f"{player_name} · 2026 KBO 정규시즌")
+
+                    if kbo_hitter is not None:
+                        st.markdown("#### 타자 공식 기록")
+                        r1 = st.columns(6)
+                        r1[0].metric("AVG", metric_value(kbo_hitter, "AVG"))
+                        r1[1].metric("경기", metric_value(kbo_hitter, "G"))
+                        r1[2].metric("타석", metric_value(kbo_hitter, "PA"))
+                        r1[3].metric("안타", metric_value(kbo_hitter, "H"))
+                        r1[4].metric("홈런", metric_value(kbo_hitter, "HR"))
+                        r1[5].metric("타점", metric_value(kbo_hitter, "RBI"))
+
+                        r2 = st.columns(6)
+                        r2[0].metric("XBH", metric_value(kbo_hitter, "XBH"))
+                        r2[1].metric("BB/K", metric_value(kbo_hitter, "BB/K"))
+                        r2[2].metric("P/PA", metric_value(kbo_hitter, "P/PA"))
+                        r2[3].metric("ISOP", metric_value(kbo_hitter, "ISOP"))
+                        r2[4].metric("XR", metric_value(kbo_hitter, "XR"))
+                        r2[5].metric("GPA", metric_value(kbo_hitter, "GPA"))
+
+                    if kbo_pitcher is not None:
+                        st.markdown("#### 투수 공식 기록")
+                        r1 = st.columns(6)
+                        r1[0].metric("ERA", metric_value(kbo_pitcher, "ERA"))
+                        r1[1].metric("경기", metric_value(kbo_pitcher, "G"))
+                        r1[2].metric("승", metric_value(kbo_pitcher, "W"))
+                        r1[3].metric("패", metric_value(kbo_pitcher, "L"))
+                        r1[4].metric("이닝", metric_value(kbo_pitcher, "IP"))
+                        r1[5].metric("탈삼진", metric_value(kbo_pitcher, "SO"))
+
+                        r2 = st.columns(6)
+                        r2[0].metric("WHIP", metric_value(kbo_pitcher, "WHIP"))
+                        r2[1].metric("세이브", metric_value(kbo_pitcher, "SV"))
+                        r2[2].metric("홀드", metric_value(kbo_pitcher, "HLD"))
+                        r2[3].metric("볼넷", metric_value(kbo_pitcher, "BB"))
+                        r2[4].metric("선발", metric_value(kbo_pitcher, "GS"))
+                        r2[5].metric("GO/AO", metric_value(kbo_pitcher, "GO/AO"))
+
+                    st.divider()
 
                 batter_data = allp[
                     allp["batter_id"].astype(str) == str(player_id)
@@ -1006,7 +1162,7 @@ elif nav == "선수":
                     st.info("이 선수의 분석 데이터가 없습니다.")
 
                 if has_batter:
-                    st.markdown("### 타자 분석")
+                    st.markdown("### DATA DUGOUT 타자 분석")
                     d = batter_data
 
                     a,b,c = st.columns(3)
@@ -1037,7 +1193,7 @@ elif nav == "선수":
                         st.bar_chart(m.set_index("pitch_type")["투구수"])
 
                 if has_pitcher:
-                    st.markdown("### 투수 분석")
+                    st.markdown("### DATA DUGOUT 투수 분석")
                     d = pitcher_data
 
                     a,b,c = st.columns(3)
