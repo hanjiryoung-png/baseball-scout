@@ -1,4 +1,5 @@
 
+
 import os, re, time, shutil, sqlite3
 from pathlib import Path
 from datetime import datetime
@@ -706,6 +707,21 @@ header{visibility:hidden}
 .mode{font-size:.85rem;padding:.35rem .65rem;border-radius:999px;border:1px solid #ddd;display:inline-block}
 div[data-testid="stMetric"]{border:1px solid #ececec;border-radius:18px;padding:16px;background:#fff}
 div[data-testid="stDataFrame"]{border-radius:14px;overflow:hidden}
+
+/* 앱 전체 제목 옆 Streamlit 자동 링크(앵커) 아이콘 숨김 */
+[data-testid="stHeaderActionElements"]{
+    display:none !important;
+}
+
+/* Streamlit 버전에 따라 heading 내부에 직접 생성되는 anchor까지 숨김 */
+[data-testid="stMarkdownContainer"] h1 a,
+[data-testid="stMarkdownContainer"] h2 a,
+[data-testid="stMarkdownContainer"] h3 a,
+[data-testid="stMarkdownContainer"] h4 a,
+[data-testid="stMarkdownContainer"] h5 a,
+[data-testid="stMarkdownContainer"] h6 a{
+    display:none !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
