@@ -1860,18 +1860,8 @@ elif nav == "팀":
     with st.container(border=True):
         top_throw,_,top_throw_share=top_pitch_info(thrown)
         top_seen,_,top_seen_share=top_pitch_info(seen)
-        a,b,c,d=st.columns(4)
-        a.metric("통합 경기",team_games["game_id"].nunique() if not team_games.empty else 0)
-        b.metric("투수진 투구",len(thrown))
-        c.metric("주 사용 구종",top_throw)
-        d.metric("주 사용 비율",f"{top_throw_share:.1f}%" if top_throw!="-" else "-")
-        a,b,c,d=st.columns(4)
-        a.metric("타선이 본 투구",len(seen))
-        b.metric("가장 많이 본 구종",top_seen)
-        c.metric("상대 구종 비율",f"{top_seen_share:.1f}%" if top_seen!="-" else "-")
-        d.metric("투수진 평균 구속",avg_speed_value(thrown))
-
-        # KBO 팀 공식 기록이 등록되어 있으면 DATA DUGOUT 핵심 분석에 공식 팀 지표도 함께 제시
+        # KBO 공식 팀 경기 수를 DATA DUGOUT 대표 경기 수로 사용합니다.
+        # Play-by-Play/NAVER 경기 수는 세부 분석 커버리지로 별도 표시합니다.
         team_official = kbo_team_records()
         _th = team_official.get("팀_타자", pd.DataFrame())
         _tp = team_official.get("팀_투수", pd.DataFrame())
@@ -1889,6 +1879,26 @@ elif nav == "팀":
         _dr = _official_row(_td)
         _rr = _official_row(_tr)
 
+        official_games = (
+            metric_value(_hr, "G")
+            if _hr is not None
+            else (metric_value(_pr, "G") if _pr is not None else "-")
+        )
+        analysis_games = team_games["game_id"].nunique() if not team_games.empty else 0
+
+        a,b,c,d=st.columns(4)
+        a.metric("공식 경기", official_games)
+        b.metric("투수진 투구",len(thrown))
+        c.metric("주 사용 구종",top_throw)
+        d.metric("주 사용 비율",f"{top_throw_share:.1f}%" if top_throw!="-" else "-")
+        st.caption(f"세부 투구 분석 반영 경기: {analysis_games}경기 · KBO 공식 팀 기록과 Play-by-Play/NAVER 분석 범위는 서로 다를 수 있습니다.")
+        a,b,c,d=st.columns(4)
+        a.metric("타선이 본 투구",len(seen))
+        b.metric("가장 많이 본 구종",top_seen)
+        c.metric("상대 구종 비율",f"{top_seen_share:.1f}%" if top_seen!="-" else "-")
+        d.metric("투수진 평균 구속",avg_speed_value(thrown))
+
+        # KBO 공식 팀 지표도 함께 제시
         if any(x is not None for x in [_hr,_pr,_dr,_rr]):
             st.markdown("#### 공식 팀 지표")
             k1,k2,k3,k4 = st.columns(4)
