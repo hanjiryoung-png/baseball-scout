@@ -334,6 +334,11 @@ def init_db():
         saved_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS favorite_teams(
+        team_name TEXT PRIMARY KEY,
+        saved_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS pitches(
         pitch_id TEXT PRIMARY KEY,
         game_id TEXT NOT NULL,
@@ -588,6 +593,43 @@ def toggle_favorite(player_id, player_name):
 
 def favorite_players():
     return qdf("SELECT player_id, player_name FROM favorites ORDER BY player_name COLLATE NOCASE ASC")
+
+
+def is_favorite_team(team_name):
+    c = db()
+    row = c.execute(
+        "SELECT 1 FROM favorite_teams WHERE team_name=?",
+        (str(team_name),)
+    ).fetchone()
+    c.close()
+    return bool(row)
+
+
+def toggle_favorite_team(team_name):
+    c = db()
+    row = c.execute(
+        "SELECT 1 FROM favorite_teams WHERE team_name=?",
+        (str(team_name),)
+    ).fetchone()
+
+    if row:
+        c.execute("DELETE FROM favorite_teams WHERE team_name=?", (str(team_name),))
+        action = "removed"
+    else:
+        c.execute(
+            "INSERT OR REPLACE INTO favorite_teams(team_name,saved_at) VALUES(?,?)",
+            (str(team_name), datetime.now().isoformat(timespec="seconds"))
+        )
+        action = "added"
+
+    c.commit()
+    c.close()
+    snapshot_db()
+    return action
+
+
+def favorite_teams():
+    return qdf("SELECT team_name FROM favorite_teams ORDER BY team_name COLLATE NOCASE ASC")
 
 
 
@@ -1631,10 +1673,12 @@ if "main_nav" not in st.session_state or st.session_state.main_nav not in nav_it
     st.session_state.main_nav = "홈"
 nav = st.radio("메인 메뉴", nav_items, horizontal=True, label_visibility="collapsed", key="main_nav")
 
-def go_to(page, player_name=None):
+def go_to(page, player_name=None, team_name=None):
     st.session_state.main_nav = page
     if player_name is not None:
         st.session_state.player_search = player_name
+    if team_name is not None:
+        st.session_state.team_select = team_name
 
 
 gc.collect()
@@ -1647,6 +1691,7 @@ if nav == "홈":
 
     summary = overview_counts()
     favs = favorite_players()
+    fav_teams = favorite_teams()
     games = recent_games_light(5)
 
     loader.empty()
@@ -1670,6 +1715,21 @@ if nav == "홈":
                     use_container_width=False,
                     on_click=go_to,
                     args=("선수", row["player_name"])
+                )
+
+    st.markdown("### ⚾ 관심 팀")
+    if fav_teams.empty:
+        st.caption("등록된 관심 팀이 없습니다. 팀 페이지에서 ☆ 관심 팀 등록을 눌러 추가할 수 있습니다.")
+    else:
+        team_cols = st.columns(6)
+        for pos, (_, row) in enumerate(fav_teams.iterrows()):
+            with team_cols[pos % 6]:
+                st.button(
+                    f"★ {row['team_name']}",
+                    key=f"home_fav_team_{row['team_name']}",
+                    use_container_width=False,
+                    on_click=go_to,
+                    args=("팀", None, row["team_name"])
                 )
 
     st.markdown("### 최근 경기")
@@ -1902,7 +1962,19 @@ elif nav == "팀":
     options = ["KT","LG","삼성","두산","KIA","NC","SSG","롯데","키움","한화"]
     priority=[t for t in PRIORITY_TEAMS if t in options]
     options=priority+[t for t in options if t not in priority]
-    team=st.selectbox("팀 선택",options)
+
+    if "team_select" not in st.session_state or st.session_state.team_select not in options:
+        st.session_state.team_select = options[0]
+
+    team=st.selectbox("팀 선택", options, key="team_select")
+
+    team_fav_now = is_favorite_team(team)
+    if st.button(
+        "★ 관심 팀 해제" if team_fav_now else "☆ 관심 팀 등록",
+        key=f"fav_team_{team}"
+    ):
+        toggle_favorite_team(team)
+        st.rerun()
 
     loader = st.empty()
     with loader.container():
@@ -2256,6 +2328,23 @@ elif nav == "선수":
     if players.empty:
         st.info("데이터를 먼저 추가해 주세요.")
     else:
+        player_favs = favorite_players()
+
+        st.markdown("### ⭐ 관심 선수")
+        if player_favs.empty:
+            st.caption("등록된 관심 선수가 없습니다.")
+        else:
+            fav_cols = st.columns(6)
+            for pos, (_, row) in enumerate(player_favs.iterrows()):
+                with fav_cols[pos % 6]:
+                    st.button(
+                        f"★ {row['player_name']}",
+                        key=f"player_page_fav_{row['player_id']}",
+                        use_container_width=False,
+                        on_click=go_to,
+                        args=("선수", row["player_name"])
+                    )
+
         st.markdown("### 선수 찾기")
         if "player_search" not in st.session_state: st.session_state.player_search=""
         search_name=st.text_input("🔍 이름 검색",placeholder="선수 이름을 입력하세요",key="player_search").strip(); st.caption("이름으로 바로 검색하거나, 아래 필터로 선수 목록을 좁혀볼 수 있습니다.")
@@ -2274,31 +2363,29 @@ elif nav == "선수":
             direct = bool(search_name and len(filtered) == 1)
             filter_used = bool(search_name or team_filter != "전체" or role_filter != "전체")
 
-            # 첫 화면에서는 546명 전체 목록을 노출하지 않습니다.
-            # 이름 검색 또는 구단/구분 필터를 사용했을 때만 결과를 보여줍니다.
-            if filter_used and not direct:
-                st.caption(f"선수 {len(filtered):,}명")
-                lv = filtered[["team","role","name"]].copy()
-                lv.columns = ["구단","구분","선수"]
-                st.dataframe(
-                    lv,
-                    hide_index=True,
-                    use_container_width=True,
-                    height=min(420, 38 * (len(lv) + 1))
-                )
-
             player_id=player_name=player_team=player_role=None
+
             if direct:
                 only=filtered.iloc[0]
-                player_id,player_name,player_team,player_role = str(only["id"]),only["name"],only["team"],only["role"]
+                player_id,player_name,player_team,player_role = (
+                    str(only["id"]), only["name"], only["team"], only["role"]
+                )
+
             elif filter_used:
-                lm={f"{r['team']} · {r['role']} · {r['name']} ({r['id']})":(str(r['id']),r['name']) for _,r in filtered.iterrows()}
-                sel=st.selectbox("분석할 선수 선택",list(lm.keys()),index=None,placeholder="선수를 선택하세요")
-                if sel is not None:
-                    player_id,player_name=lm[sel]
-                    picked=filtered[(filtered["id"].astype(str)==str(player_id))&(filtered["name"]==player_name)]
-                    if not picked.empty:
-                        player_team,player_role=picked.iloc[0]["team"],picked.iloc[0]["role"]
+                st.caption(f"선수 {len(filtered):,}명 · 이름을 클릭하면 바로 분석합니다.")
+
+                # 기존 '분석할 선수 선택' 드롭다운을 없애고
+                # 검색 결과에서 선수 이름을 직접 클릭하도록 변경
+                result_cols = st.columns(4)
+                for pos, (_, row) in enumerate(filtered.iterrows()):
+                    with result_cols[pos % 4]:
+                        st.button(
+                            f"{row['name']} · {row['team']} · {row['role']}",
+                            key=f"player_result_{row['id']}_{pos}",
+                            use_container_width=True,
+                            on_click=go_to,
+                            args=("선수", row["name"])
+                        )
             if player_id is not None:
                 st.markdown(f"### {player_name}"); st.caption(" · ".join([x for x in [player_team,player_role] if x])); fav_now=is_favorite(player_id)
                 if st.button("★ 관심 선수 해제" if fav_now else "☆ 관심 선수 등록",key=f"fav_{player_id}"): toggle_favorite(player_id,player_name); st.rerun()
