@@ -1128,7 +1128,7 @@ def load_home_base_summary(path_text, modified_ns):
     if not path_text:
         return {
             "game_ids": set(),
-            "recent_games": pd.DataFrame(columns=["game_date","away_team","home_team"]),
+            "recent_games": pd.DataFrame(columns=["game_id","game_date","away_team","home_team","away_score","home_score","source_kind"]),
             "players": pd.DataFrame(columns=["player_id","player_name","team"]),
         }
 
@@ -1136,13 +1136,14 @@ def load_home_base_summary(path_text, modified_ns):
     if not path.exists():
         return {
             "game_ids": set(),
-            "recent_games": pd.DataFrame(columns=["game_date","away_team","home_team"]),
+            "recent_games": pd.DataFrame(columns=["game_id","game_date","away_team","home_team","away_score","home_score","source_kind"]),
             "players": pd.DataFrame(columns=["player_id","player_name","team"]),
         }
 
     cols = [
         "game_pk","game_date","home_team","away_team","inning_topbot",
-        "pitcher","pitcher_name","batter","batter_name"
+        "pitcher","pitcher_name","batter","batter_name",
+        "post_home_score","post_away_score"
     ]
     raw = pd.read_parquet(path, columns=cols)
 
@@ -1154,11 +1155,20 @@ def load_home_base_summary(path_text, modified_ns):
     offense = home.where(bottom, away)
 
     # 경기
+    # 각 경기의 마지막 PBP 행에 기록된 실제 최종 스코어 사용
+    game_rows = raw.copy()
+    game_rows["_home_team_name"] = home
+    game_rows["_away_team_name"] = away
+
+    final_rows = game_rows.groupby("game_pk", sort=False).tail(1)
+
     games = pd.DataFrame({
-        "game_id": raw["game_pk"].astype(str),
-        "game_date": raw["game_date"].astype(str).str[:10],
-        "away_team": away,
-        "home_team": home,
+        "game_id": final_rows["game_pk"].astype(str),
+        "game_date": final_rows["game_date"].astype(str).str[:10],
+        "away_team": final_rows["_away_team_name"],
+        "home_team": final_rows["_home_team_name"],
+        "away_score": pd.to_numeric(final_rows["post_away_score"], errors="coerce"),
+        "home_score": pd.to_numeric(final_rows["post_home_score"], errors="coerce"),
     }).drop_duplicates("game_id")
 
     # 선수는 필요한 3개 열만 남기고 즉시 중복 제거
@@ -1181,7 +1191,9 @@ def load_home_base_summary(path_text, modified_ns):
         (players["player_name"].str.lower() != "nan")
     ].drop_duplicates(["player_id","player_name","team","role"])
 
-    recent_games = games[["game_id","game_date","away_team","home_team"]].copy()
+    recent_games = games[
+        ["game_id","game_date","away_team","home_team","away_score","home_score"]
+    ].copy()
     recent_games["source_kind"] = "PBP"
 
     return {
@@ -1423,6 +1435,8 @@ def recent_games_light(limit=5):
         if base["game_ids"]:
             nav = nav[~nav["game_id"].astype(str).isin(base["game_ids"])].copy()
         nav = nav[["game_id","game_date","away_team","home_team"]]
+        nav["away_score"] = pd.NA
+        nav["home_score"] = pd.NA
         nav["source_kind"] = "NAVER"
         games = pd.concat([base_games, nav], ignore_index=True)
     else:
@@ -1651,9 +1665,8 @@ header{visibility:hidden}
 }
 .tagline{
     width:100%;
-    display:flex;
-    justify-content:space-between;
-    gap:.55rem;
+    display:block;
+    text-align:left;
     font-size:1rem;
     font-weight:500;
     color:#6b7280;
@@ -1729,13 +1742,23 @@ div[data-testid="stDataFrame"]{border-radius:14px;overflow:hidden}
     letter-spacing:-.025em;
 }
 
-/* 상단 메뉴의 원형 radio 표시만 제거 */
-div[role="radiogroup"] > label > div:first-child{
+/* 상단 메뉴 radio 동그라미 완전 제거 */
+div[role="radiogroup"] input[type="radio"],
+div[role="radiogroup"] [data-testid="stRadio"] input,
+div[role="radiogroup"] label > div:first-child,
+div[role="radiogroup"] label svg{
     display:none !important;
+    visibility:hidden !important;
+    width:0 !important;
+    min-width:0 !important;
+    height:0 !important;
+    margin:0 !important;
+    padding:0 !important;
 }
-div[role="radiogroup"] > label{
+div[role="radiogroup"] label{
     padding-left:0 !important;
-    margin-right:.8rem !important;
+    margin-right:1.1rem !important;
+    gap:0 !important;
 }
 div[role="radiogroup"] label:has(input:checked){
     color:#102a43 !important;
@@ -1745,6 +1768,11 @@ div[role="radiogroup"] label:has(input:checked){
 /* 홈 관심 선수 버튼을 작고 촘촘하게 표시 */
 div[data-testid="stButton"] > button {
     border-radius:999px;
+}
+
+/* 관심 선수/팀 버튼의 첫 글자(★)만 짙은 네이비 */
+div[data-testid="stButton"] > button p::first-letter{
+    color:#274c77;
 }
 
 /* 앱 전체 제목 옆 Streamlit 자동 링크(앵커) 아이콘 숨김 */
@@ -1774,12 +1802,7 @@ with top1:
         """
         <div class="brand-wrap">
             <div class="brand">찐팬의 데이터 덕아웃</div>
-            <div class="tagline">
-                <span>나만의</span>
-                <span>KBO</span>
-                <span>스카우팅</span>
-                <span>리포트</span>
-            </div>
+            <div class="tagline">나만의 KBO 스카우팅 리포트</div>
         </div>
         """,
         unsafe_allow_html=True
@@ -1880,13 +1903,22 @@ if nav == "홈":
     if games.empty:
         st.caption("표시할 경기 자료가 없습니다.")
     else:
-        recent = games[["game_id","game_date","away_team","home_team","source_kind"]].copy()
+        recent = games[
+            ["game_id","game_date","away_team","home_team",
+             "away_score","home_score","source_kind"]
+        ].copy()
 
         def _home_score(row):
-            if str(row.get("source_kind")) != "NAVER":
+            if str(row.get("source_kind")) == "PBP":
+                away_score = row.get("away_score")
+                home_score = row.get("home_score")
+                if pd.notna(away_score) and pd.notna(home_score):
+                    return f"{int(away_score)} : {int(home_score)}"
                 return "-"
+
             if st.session_state.presentation_mode:
                 return "-"
+
             score = naver_final_score(row.get("game_id"))
             return score or "-"
 
