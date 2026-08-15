@@ -2392,10 +2392,38 @@ elif nav == "팀":
             if _hr is not None
             else (metric_value(_pr, "G") if _pr is not None else "-")
         )
+
+        # KBO 공식 기록 기준일 이후에 추가된 NAVER 경기만 더해
+        # 현재 통합 분석 가능한 경기 수를 계산합니다.
+        integrated_games = official_games
+        try:
+            official_game_num = int(float(official_games))
+            team_meta = _read_kbo_meta()
+            team_as_of = pd.to_datetime(team_meta.get("team_as_of"), errors="coerce")
+
+            if not nv_team_games.empty and pd.notna(team_as_of):
+                nav_dates = pd.to_datetime(
+                    nv_team_games["game_date"], errors="coerce"
+                )
+                added_after_official = int(
+                    nv_team_games.loc[nav_dates > team_as_of, "game_id"]
+                    .astype(str)
+                    .nunique()
+                )
+            elif not nv_team_games.empty:
+                # 기준일이 없으면 중복 방지를 위해 추가 합산하지 않음
+                added_after_official = 0
+            else:
+                added_after_official = 0
+
+            integrated_games = official_game_num + added_after_official
+        except Exception:
+            pass
+
         analysis_games = team_games["game_id"].nunique() if not team_games.empty else 0
 
         a,b,c,d=st.columns(4)
-        a.metric("공식 경기", official_games)
+        a.metric("통합 경기", integrated_games)
         b.metric("투수진 투구",len(thrown))
         c.metric("주 사용 구종",top_throw)
         d.metric("주 사용 비율",f"{top_throw_share:.1f}%" if top_throw!="-" else "-")
