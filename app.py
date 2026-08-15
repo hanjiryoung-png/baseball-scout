@@ -1480,6 +1480,18 @@ def team_analysis_header(title):
     )
 
 
+def player_analysis_header(title):
+    st.markdown(
+        f"""
+        <div class="player-analysis-head">
+            <div class="player-analysis-kicker">DATA DUGOUT ANALYSIS</div>
+            <div class="player-analysis-title">{title}</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
 def evidence_header():
     st.markdown('<div class="evidence-label">분석 근거 자료</div>', unsafe_allow_html=True)
 
@@ -1812,10 +1824,91 @@ div[data-testid="stDataFrame"]{
     font-weight:600;
 }
 
+.player-page-title{
+    margin-top:2.2rem;
+    margin-bottom:1.1rem;
+    font-size:1.72rem;
+    font-weight:800;
+    letter-spacing:-.04em;
+    color:#102a43;
+}
+.player-section-title{
+    margin-top:1.7rem;
+    margin-bottom:.75rem;
+    font-size:1.35rem;
+    font-weight:800;
+    letter-spacing:-.035em;
+    color:#102a43;
+}
+.player-analysis-head{
+    margin-top:1.2rem;
+    margin-bottom:.6rem;
+    padding:18px 20px;
+    border:1px solid #b7d2fb;
+    border-radius:14px;
+    background:#eef5ff;
+}
+.player-analysis-kicker{
+    font-size:.72rem;
+    font-weight:800;
+    letter-spacing:.12em;
+    color:#6b7f99;
+    margin-bottom:.25rem;
+}
+.player-analysis-title{
+    font-size:1.55rem;
+    font-weight:800;
+    color:#102a43;
+    letter-spacing:-.035em;
+}
+
+.data-page-title{
+    margin-top:2.2rem;
+    margin-bottom:1.1rem;
+    font-size:1.72rem;
+    font-weight:800;
+    letter-spacing:-.04em;
+    color:#102a43;
+}
+.data-section-title{
+    margin-top:1.8rem;
+    margin-bottom:.85rem;
+    font-size:1.35rem;
+    font-weight:800;
+    letter-spacing:-.035em;
+    color:#102a43;
+}
+.data-subtitle{
+    font-size:1.15rem;
+    font-weight:750;
+    color:#102a43;
+    letter-spacing:-.025em;
+    margin:.7rem 0 .55rem 0;
+}
+.data-caption{
+    color:#64748b;
+    font-size:.92rem;
+    line-height:1.5;
+}
+
 
 /* 홈 관심 선수 버튼을 작고 촘촘하게 표시 */
 div[data-testid="stButton"] > button {
     border-radius:999px;
+}
+
+/* 데이터 페이지 포함 전체 버튼을 홈과 같은 투명/네이비 톤으로 */
+div[data-testid="stButton"] > button[kind="primary"],
+div[data-testid="stButton"] > button[data-testid="stBaseButton-primary"]{
+    background:#ffffff !important;
+    color:#102a43 !important;
+    border:1px solid #cbd5e1 !important;
+    box-shadow:none !important;
+}
+div[data-testid="stButton"] > button[kind="primary"]:hover,
+div[data-testid="stButton"] > button[data-testid="stBaseButton-primary"]:hover{
+    background:#f8fafc !important;
+    border-color:#94a3b8 !important;
 }
 
 /* 관심 선수/팀 버튼의 첫 글자(★)만 짙은 네이비 */
@@ -1982,10 +2075,16 @@ if nav == "홈":
         )
 
 elif nav == "데이터":
-    st.markdown("## 데이터")
+    st.markdown(
+        '<div class="data-page-title">데이터</div>',
+        unsafe_allow_html=True
+    )
 
     status = data_source_status()
-    st.markdown("### 데이터 연결 상태")
+    st.markdown(
+        '<div class="data-section-title">데이터 연결 상태</div>',
+        unsafe_allow_html=True
+    )
     meta = _read_kbo_meta()
     s1, s2, s3, s4 = st.columns(4)
 
@@ -2004,11 +2103,11 @@ elif nav == "데이터":
     with s1:
         st.markdown(
             f"""
-<div style="border:1px solid #e5e7eb; border-radius:18px; padding:22px 24px; min-height:125px; background:white;">
-    <div style="font-size:24px; font-weight:700; color:#30323d; margin-bottom:14px;">
+<div style="border:1px solid #d8e6f7; border-radius:14px; padding:20px 22px; min-height:125px; background:#ffffff;">
+    <div style="font-size:20px; font-weight:750; color:#102a43; margin-bottom:12px;">
         KBO 선수 기록
     </div>
-    <div style="font-size:18px; font-weight:400; color:#6b7280;">
+    <div style="font-size:16px; font-weight:500; color:#64748b;">
         {player_date}
     </div>
 </div>
@@ -2019,11 +2118,11 @@ elif nav == "데이터":
     with s2:
         st.markdown(
             f"""
-<div style="border:1px solid #e5e7eb; border-radius:18px; padding:22px 24px; min-height:125px; background:white;">
-    <div style="font-size:24px; font-weight:700; color:#30323d; margin-bottom:14px;">
+<div style="border:1px solid #d8e6f7; border-radius:14px; padding:20px 22px; min-height:125px; background:#ffffff;">
+    <div style="font-size:20px; font-weight:750; color:#102a43; margin-bottom:12px;">
         KBO 팀 기록
     </div>
-    <div style="font-size:18px; font-weight:400; color:#6b7280;">
+    <div style="font-size:16px; font-weight:500; color:#64748b;">
         {team_date}
     </div>
 </div>
@@ -2034,11 +2133,11 @@ elif nav == "데이터":
     with s3:
         st.markdown(
             f"""
-<div style="border:1px solid #e5e7eb; border-radius:18px; padding:22px 24px; min-height:125px; background:white;">
-    <div style="font-size:24px; font-weight:700; color:#30323d; margin-bottom:14px;">
+<div style="border:1px solid #d8e6f7; border-radius:14px; padding:20px 22px; min-height:125px; background:#ffffff;">
+    <div style="font-size:20px; font-weight:750; color:#102a43; margin-bottom:12px;">
         NAVER 최신 자료
     </div>
-    <div style="font-size:18px; font-weight:400; color:#6b7280;">
+    <div style="font-size:16px; font-weight:500; color:#64748b;">
         {status['naver_games']}경기
     </div>
 </div>
@@ -2049,11 +2148,11 @@ elif nav == "데이터":
     with s4:
         st.markdown(
             f"""
-<div style="border:1px solid #e5e7eb; border-radius:18px; padding:22px 24px; min-height:125px; background:white;">
-    <div style="font-size:24px; font-weight:700; color:#30323d; margin-bottom:14px;">
+<div style="border:1px solid #d8e6f7; border-radius:14px; padding:20px 22px; min-height:125px; background:#ffffff;">
+    <div style="font-size:20px; font-weight:750; color:#102a43; margin-bottom:12px;">
         Play-by-Play 자료
     </div>
-    <div style="font-size:18px; font-weight:400; color:#6b7280;">
+    <div style="font-size:16px; font-weight:500; color:#64748b;">
         {status['base_games']}경기
     </div>
 </div>
@@ -2061,7 +2160,7 @@ elif nav == "데이터":
             unsafe_allow_html=True,
         )
 
-    st.markdown("### ① NAVER 최신 자료 추가")
+    st.markdown('<div class="data-section-title">① NAVER 최신 자료 추가</div>', unsafe_allow_html=True)
     st.caption("출처: NAVER Sports 문자중계")
     entries=[]
     for i in range(1,4):
@@ -2089,13 +2188,13 @@ elif nav == "데이터":
             st.rerun()
 
     st.divider()
-    st.markdown("### ② KBO 공식 기록 업데이트")
+    st.markdown('<div class="data-section-title">② KBO 공식 기록 업데이트</div>', unsafe_allow_html=True)
     st.caption("KBO 선수 기록과 팀 기록은 NAVER 문자중계와 별도로 저장됩니다.")
 
     k1, k2 = st.columns(2)
 
     with k1:
-        st.markdown("#### KBO 선수 기록 업데이트")
+        st.markdown('<div class="data-subtitle">KBO 선수 기록 업데이트</div>', unsafe_allow_html=True)
         st.caption(f"현재 기준: {_display_date(_read_kbo_meta().get('player_as_of') or '2026-08-10')}")
         player_as_of = st.date_input(
             "선수 기록 기준일",
@@ -2129,7 +2228,7 @@ elif nav == "데이터":
                     st.error(f"KBO 선수 기록을 업데이트하지 못했습니다: {e}")
 
     with k2:
-        st.markdown("#### KBO 팀 기록 업데이트")
+        st.markdown('<div class="data-subtitle">KBO 팀 기록 업데이트</div>', unsafe_allow_html=True)
         team_meta_date = _read_kbo_meta().get("team_as_of")
         default_team_date = pd.Timestamp(team_meta_date or "2026-08-14").date()
         st.caption(
@@ -2169,7 +2268,7 @@ elif nav == "데이터":
                     st.error(f"KBO 팀 기록을 업데이트하지 못했습니다: {e}")
 
     st.divider()
-    st.markdown("### ③ Play-by-Play 자료 관리")
+    st.markdown('<div class="data-section-title">③ Play-by-Play 자료 관리</div>', unsafe_allow_html=True)
     st.caption("출처: 공개 Play-by-Play 데이터셋")
     base_path=get_base_parquet_path(); base_p,base_g=base_data()
     if base_path is not None and not base_p.empty:
@@ -2196,6 +2295,24 @@ elif nav == "팀":
         '<div class="team-page-title">팀</div>',
         unsafe_allow_html=True
     )
+
+    # 홈 화면에 등록된 관심 팀 목록을 팀 화면에도 동일하게 표시
+    page_fav_teams = favorite_teams()
+
+    st.markdown("### 관심 팀")
+    if page_fav_teams.empty:
+        st.caption("등록된 관심 팀이 없습니다.")
+    else:
+        fav_team_cols = st.columns(6)
+        for pos, (_, row) in enumerate(page_fav_teams.iterrows()):
+            with fav_team_cols[pos % 6]:
+                st.button(
+                    f"★ {row['team_name']}",
+                    key=f"team_page_fav_{row['team_name']}",
+                    use_container_width=False,
+                    on_click=go_to,
+                    args=("팀", None, row["team_name"])
+                )
 
     # 팀 목록은 고정 10개 구단. 전체 시즌 Parquet를 먼저 열 필요가 없습니다.
     options = ["KT","LG","삼성","두산","KIA","NC","SSG","롯데","키움","한화"]
@@ -2574,7 +2691,10 @@ elif nav == "선수":
     else:
         player_favs = favorite_players()
 
-        st.markdown("### ⭐ 관심 선수")
+        st.markdown(
+            '<div class="player-section-title">관심 선수</div>',
+            unsafe_allow_html=True
+        )
         if player_favs.empty:
             st.caption("등록된 관심 선수가 없습니다.")
         else:
@@ -2589,7 +2709,10 @@ elif nav == "선수":
                         args=("선수", row["player_name"], None, row["player_id"])
                     )
 
-        st.markdown("### 선수 찾기")
+        st.markdown(
+            '<div class="player-section-title">선수 찾기</div>',
+            unsafe_allow_html=True
+        )
         if "player_search" not in st.session_state: st.session_state.player_search=""
         search_name=st.text_input("🔍 이름 검색",placeholder="선수 이름을 입력하세요",key="player_search").strip()
         st.caption("이름으로 바로 검색하거나, 아래 필터로 선수 목록을 좁혀볼 수 있습니다.")
@@ -2650,7 +2773,12 @@ elif nav == "선수":
                             args=("선수", row["name"], None, row["id"])
                         )
             if player_id is not None:
-                st.markdown(f"### {player_name}"); st.caption(" · ".join([x for x in [player_team,player_role] if x])); fav_now=is_favorite(player_id)
+                st.markdown(
+                    f'<div class="player-page-title">{player_name}</div>',
+                    unsafe_allow_html=True
+                )
+                st.caption(" · ".join([x for x in [player_team,player_role] if x]))
+                fav_now=is_favorite(player_id)
                 if st.button("★ 관심 선수 해제" if fav_now else "☆ 관심 선수 등록",key=f"fav_{player_id}"): toggle_favorite(player_id,player_name); st.rerun()
                 with st.spinner("선수 데이터를 불러오는 중입니다..."):
                     kbo_hitters,kbo_pitchers=kbo_records()
@@ -2683,7 +2811,8 @@ elif nav == "선수":
                     batter_data=pd.concat([bp_batter,nv_batter],ignore_index=True)
                     pitcher_data=pd.concat([bp_pitcher,nv_pitcher],ignore_index=True)
                     has_batter,has_pitcher=not batter_data.empty,not pitcher_data.empty
-                player_all=pd.concat([batter_data,pitcher_data],ignore_index=True) if (has_batter or has_pitcher) else pd.DataFrame(); analysis_header(f"{player_name} 선수 분석")
+                player_all=pd.concat([batter_data,pitcher_data],ignore_index=True) if (has_batter or has_pitcher) else pd.DataFrame()
+                player_analysis_header(f"{player_name} 선수 분석")
                 with st.container(border=True):
                     if has_pitcher:
                         top_pitch,_,top_share = top_pitch_info(pitcher_data)
