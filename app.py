@@ -1,5 +1,4 @@
 
-
 import os, re, time, shutil, sqlite3, gc, json
 from pathlib import Path
 from datetime import datetime
@@ -1105,11 +1104,12 @@ def load_home_base_summary(path_text, modified_ns):
 
 
 def player_master_light():
-    """선수 검색 전용 경량 목록. 전체 투구 DataFrame을 만들지 않습니다."""
+    """선수 검색 목록 = Play-by-Play + NAVER + KBO 공식 선수 기록 합집합."""
     path_text, modified_ns = _base_file_signature()
     base = load_home_base_summary(path_text, modified_ns)
     players = base["players"].copy()
 
+    # NAVER 문자중계/저장 DB 선수
     nav = qdf("""
         SELECT pitcher_id AS player_id, pitcher_name AS player_name,
                defense_team AS team, '투수' AS role
@@ -1131,6 +1131,57 @@ def player_master_light():
         ].drop_duplicates(["player_id","player_name","team","role"])
         players = pd.concat([players, nav], ignore_index=True)
 
+    # KBO 공식 선수 기록도 검색 목록에 포함
+    kbo_hitters, kbo_pitchers = kbo_records()
+    kbo_parts = []
+
+    if kbo_hitters is not None and not kbo_hitters.empty and "선수명" in kbo_hitters.columns:
+        kh = pd.DataFrame({
+            "player_id": "",
+            "player_name": kbo_hitters["선수명"].fillna("").astype(str).str.strip(),
+            "team": kbo_hitters["팀명"].fillna("").astype(str).str.strip()
+                    if "팀명" in kbo_hitters.columns else "",
+            "role": "타자",
+        })
+        kbo_parts.append(kh)
+
+    if kbo_pitchers is not None and not kbo_pitchers.empty and "선수명" in kbo_pitchers.columns:
+        kp = pd.DataFrame({
+            "player_id": "",
+            "player_name": kbo_pitchers["선수명"].fillna("").astype(str).str.strip(),
+            "team": kbo_pitchers["팀명"].fillna("").astype(str).str.strip()
+                    if "팀명" in kbo_pitchers.columns else "",
+            "role": "투수",
+        })
+        kbo_parts.append(kp)
+
+    if kbo_parts:
+        kbo_players = pd.concat(kbo_parts, ignore_index=True)
+        kbo_players = kbo_players[
+            (kbo_players["player_name"] != "") &
+            (kbo_players["player_name"].str.lower() != "nan")
+        ].drop_duplicates(["player_name","team","role"])
+
+        # 같은 이름+팀이 PBP/NAVER에 있으면 그 ID를 KBO 행에도 연결
+        if not players.empty:
+            id_map = (
+                players.assign(
+                    player_name=players["player_name"].fillna("").astype(str).str.strip(),
+                    team=players["team"].fillna("").astype(str).str.strip(),
+                    player_id=players["player_id"].fillna("").astype(str).str.strip(),
+                )
+                .query("player_id != ''")
+                .drop_duplicates(["player_name","team"])
+                .set_index(["player_name","team"])["player_id"]
+                .to_dict()
+            )
+            kbo_players["player_id"] = [
+                id_map.get((n, t), "")
+                for n, t in zip(kbo_players["player_name"], kbo_players["team"])
+            ]
+
+        players = pd.concat([players, kbo_players], ignore_index=True)
+
     if players.empty:
         return pd.DataFrame(columns=["id","name","team","role"])
 
@@ -1142,11 +1193,19 @@ def player_master_light():
     players["team"] = players["team"].fillna("").astype(str).str.strip()
     players["role"] = players["role"].fillna("").astype(str).str.strip()
     players = players[
-        (players["id"] != "") &
-        (players["id"].str.lower() != "nan") &
         (players["name"] != "") &
         (players["name"].str.lower() != "nan")
-    ].drop_duplicates(["id","name","team","role"])
+    ]
+
+    # KBO에만 있는 선수는 ID가 없으므로 이름+팀 기반의 안정적인 내부 검색키 생성
+    missing_id = (players["id"] == "") | (players["id"].str.lower() == "nan")
+    players.loc[missing_id, "id"] = (
+        "KBO:" +
+        players.loc[missing_id, "team"].astype(str) + ":" +
+        players.loc[missing_id, "name"].astype(str)
+    )
+
+    players = players.drop_duplicates(["id","name","team","role"])
 
     rows = []
     for (pid, name), g in players.groupby(["id","name"], sort=False):
@@ -1160,8 +1219,18 @@ def player_master_light():
             "role": role_label,
         })
 
-    return pd.DataFrame(rows).sort_values(["team","role","name"]).reset_index(drop=True)
+    result = pd.DataFrame(rows)
 
+    # 같은 선수(이름+팀)가 KBO 내부키와 실제 PBP/NAVER ID로 중복된 경우 실제 ID 우선
+    if not result.empty:
+        result["_real_id"] = ~result["id"].astype(str).str.startswith("KBO:")
+        result = (
+            result.sort_values(["name","team","_real_id"], ascending=[True, True, False])
+                  .drop_duplicates(["name","team"], keep="first")
+                  .drop(columns="_real_id")
+        )
+
+    return result.sort_values(["team","role","name"]).reset_index(drop=True)
 
 def _dedup_extra_against_base(extra, base_games):
     if extra is None or extra.empty:
