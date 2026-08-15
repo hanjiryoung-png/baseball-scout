@@ -619,6 +619,13 @@ def kbo_record_year():
     m = re.search(r"(20\d{2})", REPO_KBO_RECORDS.name)
     return m.group(1) if m else None
 
+
+def show_center_loader():
+    st.markdown(
+        '<div class="center-loader"><div class="center-loader-ring"></div></div>',
+        unsafe_allow_html=True
+    )
+
 def top_pitch_info(df):
     if df is None or df.empty or "pitch_type" not in df.columns:
         return "-", 0, 0.0
@@ -878,6 +885,28 @@ header{visibility:hidden}
 .mode{font-size:.85rem;padding:.35rem .65rem;border-radius:999px;border:1px solid #ddd;display:inline-block}
 div[data-testid="stMetric"]{border:1px solid #ececec;border-radius:18px;padding:16px;background:#fff}
 div[data-testid="stDataFrame"]{border-radius:14px;overflow:hidden}
+
+/* 중앙 로딩 표시 */
+.center-loader{
+    position:fixed;
+    inset:0;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    background:rgba(255,255,255,.72);
+    z-index:99999;
+}
+.center-loader-ring{
+    width:34px;
+    height:34px;
+    border:4px solid #d9dde3;
+    border-top-color:#555b66;
+    border-radius:50%;
+    animation:dugout-spin .8s linear infinite;
+}
+@keyframes dugout-spin{
+    to{transform:rotate(360deg)}
+}
 .dugout-analysis-head{margin-top:1rem;margin-bottom:.35rem;padding:20px 22px;border:2px solid #1f2937;border-radius:18px;background:linear-gradient(135deg,#fafafa 0%,#f1f5f9 100%)}
 .dugout-analysis-kicker{font-size:.72rem;font-weight:800;letter-spacing:.14em;color:#64748b;margin-bottom:.25rem}
 .dugout-analysis-title{font-size:1.55rem;font-weight:850;color:#111827;letter-spacing:-.035em}
@@ -929,16 +958,26 @@ def go_to(page, player_name=None):
         st.session_state.player_search = player_name
 
 
-with st.spinner("화면을 불러오는 중입니다..."):
-    games = all_games()
-    if not games.empty:
-        games = games.sort_values(["game_date","saved_at"], ascending=[False,False], na_position="last")
-    counts = current_counts()
+loader = st.empty()
+with loader.container():
+    show_center_loader()
+
+games = all_games()
+if not games.empty:
+    games = games.sort_values(["game_date","saved_at"], ascending=[False,False], na_position="last")
+counts = current_counts()
+
+loader.empty()
 
 if nav == "홈":
-    with st.spinner("홈 데이터를 정리하는 중입니다..."):
-        summary = overview_counts()
-        favs = favorite_players()
+    loader = st.empty()
+    with loader.container():
+        show_center_loader()
+
+    summary = overview_counts()
+    favs = favorite_players()
+
+    loader.empty()
 
     st.markdown("## DATA DUGOUT 현황")
     h1,h2 = st.columns(2)
@@ -1036,11 +1075,16 @@ elif nav == "데이터":
 
 elif nav == "팀":
     st.markdown("## 팀")
-    with st.spinner("팀 분석 자료를 불러오는 중입니다..."):
-        allp=all_pitches()
-        allg=all_games()
-        base_p,naver_p=source_pitches()
-        base_g,naver_g=source_games()
+    loader = st.empty()
+    with loader.container():
+        show_center_loader()
+
+    allp=all_pitches()
+    allg=all_games()
+    base_p,naver_p=source_pitches()
+    base_g,naver_g=source_games()
+
+    loader.empty()
     present=sorted(set(allg.away_team.dropna()).union(set(allg.home_team.dropna()))) if not allg.empty else []
     priority=[t for t in PRIORITY_TEAMS if t in present]; options=priority+[t for t in present if t not in priority]
     if not options: st.info("데이터를 먼저 추가해 주세요.")
@@ -1073,8 +1117,13 @@ elif nav == "팀":
         p1,p2,p3=st.columns(3); p1.metric("경기",bp_team_games["game_id"].nunique() if not bp_team_games.empty else 0); p2.metric("투수진 투구",len(bp_thrown)); p3.metric("타선이 본 투구",len(bp_seen)); st.caption(f"자료 기간: {analysis_period(bp_team_games) or '-'}"); st.caption("출처: 공개 Play-by-Play 데이터셋")
 
 elif nav == "선수":
-    with st.spinner("선수 자료를 불러오는 중입니다..."):
-        allp=all_pitches()
+    loader = st.empty()
+    with loader.container():
+        show_center_loader()
+
+    allp=all_pitches()
+
+    loader.empty()
     if allp.empty: st.info("데이터를 먼저 추가해 주세요.")
     else:
         batter_rows=allp[["batter_id","batter_name","offense_team","game_date"]].rename(columns={"batter_id":"id","batter_name":"name","offense_team":"team","game_date":"game_date"}); batter_rows["role"]="타자"
