@@ -1,6 +1,6 @@
 
 
-import os, re, time, shutil, sqlite3
+import os, re, time, shutil, sqlite3, gc
 from pathlib import Path
 from datetime import datetime
 
@@ -460,7 +460,6 @@ def get_base_parquet_path():
         return UPLOADED_BASE_PARQUET
     return None
 
-@st.cache_data(show_spinner=False)
 def load_base_parquet(path_text, modified_ns):
     path = Path(path_text)
     raw = pd.read_parquet(path, columns=BASE_COLUMNS)
@@ -521,6 +520,151 @@ def load_base_parquet(path_text, modified_ns):
         .reset_index(drop=True)
     )
     return d, games
+
+
+def _normalize_base_subset(raw):
+    """Play-by-Play 원자료의 일부 행만 공통 분석 형식으로 변환."""
+    if raw is None or raw.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    home = raw["home_team"].map(TEAM).fillna(raw["home_team"])
+    away = raw["away_team"].map(TEAM).fillna(raw["away_team"])
+    is_bottom = raw["inning_topbot"].astype(str).str.lower().isin(["bot","bottom","말"])
+
+    result_map = {
+        "T":"스트라이크",
+        "B":"볼",
+        "F":"파울",
+        "S":"헛스윙",
+        "H":"타격",
+    }
+
+    pitch_type = raw["_naver_pitch_name"].copy()
+    pitch_type = pitch_type.where(
+        pitch_type.notna() & (pitch_type.astype(str) != ""),
+        raw["pitch_name"]
+    )
+
+    d = pd.DataFrame({
+        "pitch_id": (
+            raw["game_pk"].astype(str) + "|" +
+            raw["at_bat_number"].astype(str) + "|" +
+            raw["pitch_number"].astype(str)
+        ),
+        "game_id": raw["game_pk"].astype(str),
+        "game_date": raw["game_date"].astype(str).str[:10],
+        "inning": raw["inning"],
+        "half": is_bottom.map({True:"말", False:"초"}),
+        "offense_team": home.where(is_bottom, away),
+        "defense_team": away.where(is_bottom, home),
+        "pitcher_id": raw["pitcher"].astype(str),
+        "pitcher_name": raw["pitcher_name"],
+        "batter_id": raw["batter"].astype(str),
+        "batter_name": raw["batter_name"],
+        "pitch_num": raw["pitch_number"],
+        "pitch_type": pitch_type,
+        "speed": raw["release_speed_kmh"],
+        "result_code": raw["pitch_result"],
+        "pitch_text": raw["pitch_result"].map(result_map).fillna(raw["pitch_result"]),
+        "balls": raw["balls"],
+        "strikes": raw["strikes"],
+        "outs": raw["outs_when_up"],
+        "plate_x": raw["plate_x"],
+        "plate_y": raw["plate_z"],
+        "pa_result": raw["events"],
+    })
+
+    games = (
+        pd.DataFrame({
+            "game_id": raw["game_pk"].astype(str),
+            "game_date": raw["game_date"].astype(str).str[:10],
+            "away_team": away,
+            "home_team": home,
+        })
+        .drop_duplicates("game_id")
+        .reset_index(drop=True)
+    )
+    return d, games
+
+
+def _player_filter_value(player_id):
+    s = str(player_id).strip()
+    if s.isdigit():
+        try:
+            return int(s)
+        except Exception:
+            return s
+    return s
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def load_base_player_subset(path_text, modified_ns, player_id):
+    """선택한 선수의 행만 Parquet에서 읽음."""
+    if not path_text:
+        return pd.DataFrame(), pd.DataFrame()
+
+    val = _player_filter_value(player_id)
+    filters = [
+        [("pitcher", "==", val)],
+        [("batter", "==", val)],
+    ]
+
+    try:
+        raw = pd.read_parquet(
+            path_text,
+            columns=BASE_COLUMNS,
+            filters=filters
+        )
+    except Exception:
+        # parquet 스키마가 문자열 ID인 경우 재시도
+        sval = str(player_id)
+        filters = [
+            [("pitcher", "==", sval)],
+            [("batter", "==", sval)],
+        ]
+        raw = pd.read_parquet(
+            path_text,
+            columns=BASE_COLUMNS,
+            filters=filters
+        )
+
+    return _normalize_base_subset(raw)
+
+
+@st.cache_data(show_spinner=False, max_entries=6)
+def load_base_team_subset(path_text, modified_ns, team):
+    """선택한 팀이 출전한 경기 행만 Parquet에서 읽음."""
+    if not path_text:
+        return pd.DataFrame(), pd.DataFrame()
+
+    raw_codes = sorted({k for k,v in TEAM.items() if v == team} | {team})
+    filters = []
+    for code in raw_codes:
+        filters.append([("home_team", "==", code)])
+        filters.append([("away_team", "==", code)])
+
+    raw = pd.read_parquet(
+        path_text,
+        columns=BASE_COLUMNS,
+        filters=filters
+    )
+    return _normalize_base_subset(raw)
+
+
+def base_player_data(player_id):
+    path = get_base_parquet_path()
+    if path is None:
+        return pd.DataFrame(), pd.DataFrame()
+    stat = path.stat()
+    return load_base_player_subset(str(path), stat.st_mtime_ns, str(player_id))
+
+
+def base_team_data(team):
+    path = get_base_parquet_path()
+    if path is None:
+        return pd.DataFrame(), pd.DataFrame()
+    stat = path.stat()
+    return load_base_team_subset(str(path), stat.st_mtime_ns, str(team))
 
 def base_data():
     path = get_base_parquet_path()
@@ -785,18 +929,20 @@ def load_home_base_summary(path_text, modified_ns):
         "player_id": raw["pitcher"].fillna("").astype(str).str.strip(),
         "player_name": raw["pitcher_name"].fillna("").astype(str).str.strip(),
         "team": defense.fillna("").astype(str).str.strip(),
+        "role": "투수",
     })
     batters = pd.DataFrame({
         "player_id": raw["batter"].fillna("").astype(str).str.strip(),
         "player_name": raw["batter_name"].fillna("").astype(str).str.strip(),
         "team": offense.fillna("").astype(str).str.strip(),
+        "role": "타자",
     })
 
     players = pd.concat([pitchers, batters], ignore_index=True)
     players = players[
         (players["player_name"] != "") &
         (players["player_name"].str.lower() != "nan")
-    ].drop_duplicates(["player_id","player_name","team"])
+    ].drop_duplicates(["player_id","player_name","team","role"])
 
     return {
         "game_ids": set(games["game_id"].astype(str)),
@@ -804,6 +950,74 @@ def load_home_base_summary(path_text, modified_ns):
         "players": players,
     }
 
+
+
+def player_master_light():
+    """선수 검색 전용 경량 목록. 전체 투구 DataFrame을 만들지 않습니다."""
+    path_text, modified_ns = _base_file_signature()
+    base = load_home_base_summary(path_text, modified_ns)
+    players = base["players"].copy()
+
+    nav = qdf("""
+        SELECT pitcher_id AS player_id, pitcher_name AS player_name,
+               defense_team AS team, '투수' AS role
+        FROM pitches
+        UNION ALL
+        SELECT batter_id AS player_id, batter_name AS player_name,
+               offense_team AS team, '타자' AS role
+        FROM pitches
+    """)
+
+    if nav is not None and not nav.empty:
+        nav["player_id"] = nav["player_id"].fillna("").astype(str).str.strip()
+        nav["player_name"] = nav["player_name"].fillna("").astype(str).str.strip()
+        nav["team"] = nav["team"].fillna("").astype(str).str.strip()
+        nav["role"] = nav["role"].fillna("").astype(str).str.strip()
+        nav = nav[
+            (nav["player_name"] != "") &
+            (nav["player_name"].str.lower() != "nan")
+        ].drop_duplicates(["player_id","player_name","team","role"])
+        players = pd.concat([players, nav], ignore_index=True)
+
+    if players.empty:
+        return pd.DataFrame(columns=["id","name","team","role"])
+
+    players = players.rename(columns={
+        "player_id":"id", "player_name":"name"
+    })
+    players["id"] = players["id"].fillna("").astype(str).str.strip()
+    players["name"] = players["name"].fillna("").astype(str).str.strip()
+    players["team"] = players["team"].fillna("").astype(str).str.strip()
+    players["role"] = players["role"].fillna("").astype(str).str.strip()
+    players = players[
+        (players["id"] != "") &
+        (players["id"].str.lower() != "nan") &
+        (players["name"] != "") &
+        (players["name"].str.lower() != "nan")
+    ].drop_duplicates(["id","name","team","role"])
+
+    rows = []
+    for (pid, name), g in players.groupby(["id","name"], sort=False):
+        roles = set(g["role"].dropna())
+        role_label = "투타" if roles == {"타자","투수"} else ("투수" if "투수" in roles else "타자")
+        teams = [t for t in g["team"].tolist() if t]
+        rows.append({
+            "id": str(pid),
+            "name": name,
+            "team": teams[-1] if teams else "",
+            "role": role_label,
+        })
+
+    return pd.DataFrame(rows).sort_values(["team","role","name"]).reset_index(drop=True)
+
+
+def _dedup_extra_against_base(extra, base_games):
+    if extra is None or extra.empty:
+        return pd.DataFrame()
+    if base_games is None or base_games.empty:
+        return extra.copy()
+    base_ids = set(base_games["game_id"].astype(str))
+    return extra[~extra["game_id"].astype(str).isin(base_ids)].copy()
 
 def overview_counts():
     """홈 화면용 경량 집계.
@@ -1189,6 +1403,8 @@ def go_to(page, player_name=None):
         st.session_state.player_search = player_name
 
 
+gc.collect()
+
 if nav == "홈":
     loader = st.empty()
     with loader.container():
@@ -1270,6 +1486,7 @@ elif nav == "데이터":
                 except Exception as e:
                     st.error(f"수집을 중단했습니다: {e}"); break
                 progress.progress(i/len(values[:5]))
+            st.rerun()
 
     st.divider()
     st.markdown("### ② Play-by-Play 자료 관리")
@@ -1287,7 +1504,7 @@ elif nav == "데이터":
         try:
             temp_path=DATA_DIR/"kbo_pbp_2026.uploading"
             with open(temp_path,"wb") as f: f.write(uploaded.getbuffer())
-            temp_path.replace(UPLOADED_BASE_PARQUET); load_base_parquet.clear(); base_p,base_g=base_data()
+            temp_path.replace(UPLOADED_BASE_PARQUET); base_p,base_g=base_data()
             if base_p.empty: st.error("파일을 읽지 못했습니다.")
             else:
                 st.success("Play-by-Play 자료 업데이트가 완료되었습니다.")
@@ -1296,66 +1513,112 @@ elif nav == "데이터":
 
 elif nav == "팀":
     st.markdown("## 팀")
+
+    # 팀 목록은 고정 10개 구단. 전체 시즌 Parquet를 먼저 열 필요가 없습니다.
+    options = ["KT","LG","삼성","두산","KIA","NC","SSG","롯데","키움","한화"]
+    priority=[t for t in PRIORITY_TEAMS if t in options]
+    options=priority+[t for t in options if t not in priority]
+    team=st.selectbox("팀 선택",options)
+
     loader = st.empty()
     with loader.container():
         show_center_loader()
 
-    allp=all_pitches()
-    allg=all_games()
-    base_p,naver_p=source_pitches()
-    base_g,naver_g=source_games()
+    # 선택한 팀 경기만 Parquet에서 읽음
+    bp_team_p, bp_team_games = base_team_data(team)
+
+    naver_p = extra_pitches()
+    naver_g = extra_games()
+
+    # 중복 NAVER 경기 제거에는 가벼운 base game id 목록만 사용
+    path_text, modified_ns = _base_file_signature()
+    base_summary = load_home_base_summary(path_text, modified_ns)
+    base_ids = base_summary["game_ids"]
+
+    if not naver_p.empty:
+        naver_p = naver_p[~naver_p["game_id"].astype(str).isin(base_ids)].copy()
+    if not naver_g.empty:
+        naver_g = naver_g[~naver_g["game_id"].astype(str).isin(base_ids)].copy()
+
+    nv_team_games = naver_g[
+        (naver_g["away_team"]==team)|(naver_g["home_team"]==team)
+    ].copy() if not naver_g.empty else pd.DataFrame()
+
+    nv_thrown = naver_p[naver_p["defense_team"]==team].copy() if not naver_p.empty else pd.DataFrame()
+    nv_seen = naver_p[naver_p["offense_team"]==team].copy() if not naver_p.empty else pd.DataFrame()
+
+    bp_thrown = bp_team_p[bp_team_p["defense_team"]==team].copy() if not bp_team_p.empty else pd.DataFrame()
+    bp_seen = bp_team_p[bp_team_p["offense_team"]==team].copy() if not bp_team_p.empty else pd.DataFrame()
+
+    thrown = pd.concat([bp_thrown,nv_thrown],ignore_index=True)
+    seen = pd.concat([bp_seen,nv_seen],ignore_index=True)
+    team_games = pd.concat([bp_team_games,nv_team_games],ignore_index=True)
 
     loader.empty()
-    present=sorted(set(allg.away_team.dropna()).union(set(allg.home_team.dropna()))) if not allg.empty else []
-    priority=[t for t in PRIORITY_TEAMS if t in present]; options=priority+[t for t in present if t not in priority]
-    if not options: st.info("데이터를 먼저 추가해 주세요.")
-    else:
-        team=st.selectbox("팀 선택",options)
-        team_games=allg[(allg["away_team"]==team)|(allg["home_team"]==team)].copy()
-        thrown=allp[allp["defense_team"]==team].copy() if not allp.empty else pd.DataFrame()
-        seen=allp[allp["offense_team"]==team].copy() if not allp.empty else pd.DataFrame()
-        analysis_header(f"{team} 팀 분석")
-        with st.container(border=True):
-            top_throw,_,top_throw_share=top_pitch_info(thrown); top_seen,_,top_seen_share=top_pitch_info(seen)
-            a,b,c,d=st.columns(4)
-            a.metric("통합 경기",team_games["game_id"].nunique() if not team_games.empty else 0); b.metric("투수진 투구",len(thrown)); c.metric("주 사용 구종",top_throw); d.metric("주 사용 비율",f"{top_throw_share:.1f}%" if top_throw!="-" else "-")
-            a,b,c,d=st.columns(4)
-            a.metric("타선이 본 투구",len(seen)); b.metric("가장 많이 본 구종",top_seen); c.metric("상대 구종 비율",f"{top_seen_share:.1f}%" if top_seen!="-" else "-"); d.metric("투수진 평균 구속",avg_speed_value(thrown))
-            st.markdown("#### 투수진 구종 구성")
-            if not thrown.empty:
-                mix=thrown.groupby("pitch_type",dropna=True).agg(투구수=("pitch_id","count"),평균구속=("speed","mean")).reset_index(); mix["평균구속"]=mix["평균구속"].round(1)
-                st.bar_chart(mix.set_index("pitch_type")["투구수"]); st.dataframe(mix.sort_values("투구수",ascending=False),hide_index=True,use_container_width=True)
-            st.markdown("#### 타선이 상대해 온 구종")
-            if not seen.empty:
-                mix2=seen.groupby("pitch_type",dropna=True).size().reset_index(name="투구수"); st.bar_chart(mix2.set_index("pitch_type")["투구수"]); st.dataframe(mix2.sort_values("투구수",ascending=False),hide_index=True,use_container_width=True)
-        evidence_header()
-        st.markdown("### KBO 공식 기록"); st.caption("출처: KBO 공식 홈페이지"); st.info("KBO 팀 공식 기록 자료는 아직 연결되지 않았습니다. 팀 기록 확보 후 DATA DUGOUT 팀 분석에도 반영합니다.")
-        st.markdown("### NAVER 최신 자료")
-        nv_team_games=naver_g[(naver_g["away_team"]==team)|(naver_g["home_team"]==team)].copy() if not naver_g.empty else pd.DataFrame(); nv_thrown=naver_p[naver_p["defense_team"]==team].copy() if not naver_p.empty else pd.DataFrame(); nv_seen=naver_p[naver_p["offense_team"]==team].copy() if not naver_p.empty else pd.DataFrame()
-        n1,n2,n3=st.columns(3); n1.metric("최신 경기",nv_team_games["game_id"].nunique() if not nv_team_games.empty else 0); n2.metric("투수진 최신 투구",len(nv_thrown)); n3.metric("타선 최신 상대 투구",len(nv_seen)); st.caption("출처: NAVER Sports 문자중계")
-        st.markdown("### Play-by-Play 자료")
-        bp_team_games=base_g[(base_g["away_team"]==team)|(base_g["home_team"]==team)].copy() if not base_g.empty else pd.DataFrame(); bp_thrown=base_p[base_p["defense_team"]==team].copy() if not base_p.empty else pd.DataFrame(); bp_seen=base_p[base_p["offense_team"]==team].copy() if not base_p.empty else pd.DataFrame()
-        p1,p2,p3=st.columns(3); p1.metric("경기",bp_team_games["game_id"].nunique() if not bp_team_games.empty else 0); p2.metric("투수진 투구",len(bp_thrown)); p3.metric("타선이 본 투구",len(bp_seen)); st.caption(f"자료 기간: {analysis_period(bp_team_games) or '-'}"); st.caption("출처: 공개 Play-by-Play 데이터셋")
+
+    analysis_header(f"{team} 팀 분석")
+    with st.container(border=True):
+        top_throw,_,top_throw_share=top_pitch_info(thrown)
+        top_seen,_,top_seen_share=top_pitch_info(seen)
+        a,b,c,d=st.columns(4)
+        a.metric("통합 경기",team_games["game_id"].nunique() if not team_games.empty else 0)
+        b.metric("투수진 투구",len(thrown))
+        c.metric("주 사용 구종",top_throw)
+        d.metric("주 사용 비율",f"{top_throw_share:.1f}%" if top_throw!="-" else "-")
+        a,b,c,d=st.columns(4)
+        a.metric("타선이 본 투구",len(seen))
+        b.metric("가장 많이 본 구종",top_seen)
+        c.metric("상대 구종 비율",f"{top_seen_share:.1f}%" if top_seen!="-" else "-")
+        d.metric("투수진 평균 구속",avg_speed_value(thrown))
+
+        st.markdown("#### 투수진 구종 구성")
+        if not thrown.empty:
+            mix=thrown.groupby("pitch_type",dropna=True).agg(
+                투구수=("pitch_id","count"),평균구속=("speed","mean")
+            ).reset_index()
+            mix["평균구속"]=mix["평균구속"].round(1)
+            st.bar_chart(mix.set_index("pitch_type")["투구수"])
+            st.dataframe(mix.sort_values("투구수",ascending=False),hide_index=True,use_container_width=True)
+
+        st.markdown("#### 타선이 상대해 온 구종")
+        if not seen.empty:
+            mix2=seen.groupby("pitch_type",dropna=True).size().reset_index(name="투구수")
+            st.bar_chart(mix2.set_index("pitch_type")["투구수"])
+            st.dataframe(mix2.sort_values("투구수",ascending=False),hide_index=True,use_container_width=True)
+
+    evidence_header()
+
+    st.markdown("### KBO 공식 기록")
+    st.caption("출처: KBO 공식 홈페이지")
+    st.info("KBO 팀 공식 기록 자료는 아직 연결되지 않았습니다. 팀 기록 확보 후 DATA DUGOUT 팀 분석에도 반영합니다.")
+
+    st.markdown("### NAVER 최신 자료")
+    n1,n2,n3=st.columns(3)
+    n1.metric("최신 경기",nv_team_games["game_id"].nunique() if not nv_team_games.empty else 0)
+    n2.metric("투수진 최신 투구",len(nv_thrown))
+    n3.metric("타선 최신 상대 투구",len(nv_seen))
+    st.caption("출처: NAVER Sports 문자중계")
+
+    st.markdown("### Play-by-Play 자료")
+    p1,p2,p3=st.columns(3)
+    p1.metric("경기",bp_team_games["game_id"].nunique() if not bp_team_games.empty else 0)
+    p2.metric("투수진 투구",len(bp_thrown))
+    p3.metric("타선이 본 투구",len(bp_seen))
+    st.caption(f"자료 기간: {analysis_period(bp_team_games) or '-'}")
+    st.caption("출처: 공개 Play-by-Play 데이터셋")
 
 elif nav == "선수":
     loader = st.empty()
     with loader.container():
         show_center_loader()
 
-    allp=all_pitches()
+    # 검색/필터 단계에서는 전체 투구 데이터를 읽지 않음
+    players = player_master_light()
 
     loader.empty()
-    if allp.empty: st.info("데이터를 먼저 추가해 주세요.")
+    if players.empty:
+        st.info("데이터를 먼저 추가해 주세요.")
     else:
-        batter_rows=allp[["batter_id","batter_name","offense_team","game_date"]].rename(columns={"batter_id":"id","batter_name":"name","offense_team":"team","game_date":"game_date"}); batter_rows["role"]="타자"
-        pitcher_rows=allp[["pitcher_id","pitcher_name","defense_team","game_date"]].rename(columns={"pitcher_id":"id","pitcher_name":"name","defense_team":"team","game_date":"game_date"}); pitcher_rows["role"]="투수"
-        role_rows=pd.concat([batter_rows,pitcher_rows],ignore_index=True).dropna(subset=["id","name"]); role_rows["id"]=role_rows["id"].astype(str); role_rows["name"]=role_rows["name"].astype(str); role_rows["team"]=role_rows["team"].fillna("").astype(str); role_rows["game_date"]=pd.to_datetime(role_rows["game_date"],errors="coerce")
-        role_rows=role_rows[(role_rows["id"]!="")&(role_rows["name"]!="")&(role_rows["id"]!="nan")&(role_rows["name"]!="nan")]
-        latest_team=role_rows.sort_values("game_date").drop_duplicates(["id","role"],keep="last")[["id","role","team"]]; player_master=role_rows[["id","name","role"]].drop_duplicates().merge(latest_team,on=["id","role"],how="left")
-        grouped=[]
-        for (pid,name),g in player_master.groupby(["id","name"],sort=False):
-            roles=set(g["role"].dropna()); role_label="투타" if roles=={"타자","투수"} else ("투수" if "투수" in roles else "타자"); teams0=[t for t in g["team"].tolist() if t]; grouped.append({"id":str(pid),"name":name,"team":teams0[-1] if teams0 else "","role":role_label})
-        players=pd.DataFrame(grouped).sort_values(["team","role","name"]).reset_index(drop=True)
         st.markdown("### 선수 찾기")
         if "player_search" not in st.session_state: st.session_state.player_search=""
         search_name=st.text_input("🔍 이름 검색",placeholder="선수 이름을 입력하세요",key="player_search").strip(); st.caption("이름으로 바로 검색하거나, 아래 필터로 선수 목록을 좁혀볼 수 있습니다.")
@@ -1402,9 +1665,37 @@ elif nav == "선수":
             if player_id is not None:
                 st.markdown(f"### {player_name}"); st.caption(" · ".join([x for x in [player_team,player_role] if x])); fav_now=is_favorite(player_id)
                 if st.button("★ 관심 선수 해제" if fav_now else "☆ 관심 선수 등록",key=f"fav_{player_id}"): toggle_favorite(player_id,player_name); st.rerun()
-                kbo_hitters,kbo_pitchers=kbo_records(); kbo_hitter=find_kbo_player(kbo_hitters,player_name,player_team); kbo_pitcher=find_kbo_player(kbo_pitchers,player_name,player_team)
-                batter_data=allp[allp["batter_id"].astype(str)==str(player_id)].copy(); pitcher_data=allp[allp["pitcher_id"].astype(str)==str(player_id)].copy(); has_batter,has_pitcher=not batter_data.empty,not pitcher_data.empty
-                base_player_p,naver_player_p=source_pitches(); bp_batter=base_player_p[base_player_p["batter_id"].astype(str)==str(player_id)].copy() if not base_player_p.empty else pd.DataFrame(); bp_pitcher=base_player_p[base_player_p["pitcher_id"].astype(str)==str(player_id)].copy() if not base_player_p.empty else pd.DataFrame(); nv_batter=naver_player_p[naver_player_p["batter_id"].astype(str)==str(player_id)].copy() if not naver_player_p.empty else pd.DataFrame(); nv_pitcher=naver_player_p[naver_player_p["pitcher_id"].astype(str)==str(player_id)].copy() if not naver_player_p.empty else pd.DataFrame()
+                with st.spinner("선수 데이터를 불러오는 중입니다..."):
+                    kbo_hitters,kbo_pitchers=kbo_records()
+                    kbo_hitter=find_kbo_player(kbo_hitters,player_name,player_team)
+                    kbo_pitcher=find_kbo_player(kbo_pitchers,player_name,player_team)
+
+                    base_player_p, base_player_g = base_player_data(player_id)
+
+                    path_text, modified_ns = _base_file_signature()
+                    base_ids = load_home_base_summary(path_text, modified_ns)["game_ids"]
+                    naver_player_p = extra_pitches()
+                    if not naver_player_p.empty:
+                        naver_player_p = naver_player_p[
+                            ~naver_player_p["game_id"].astype(str).isin(base_ids)
+                        ].copy()
+
+                    bp_batter=base_player_p[
+                        base_player_p["batter_id"].astype(str)==str(player_id)
+                    ].copy() if not base_player_p.empty else pd.DataFrame()
+                    bp_pitcher=base_player_p[
+                        base_player_p["pitcher_id"].astype(str)==str(player_id)
+                    ].copy() if not base_player_p.empty else pd.DataFrame()
+                    nv_batter=naver_player_p[
+                        naver_player_p["batter_id"].astype(str)==str(player_id)
+                    ].copy() if not naver_player_p.empty else pd.DataFrame()
+                    nv_pitcher=naver_player_p[
+                        naver_player_p["pitcher_id"].astype(str)==str(player_id)
+                    ].copy() if not naver_player_p.empty else pd.DataFrame()
+
+                    batter_data=pd.concat([bp_batter,nv_batter],ignore_index=True)
+                    pitcher_data=pd.concat([bp_pitcher,nv_pitcher],ignore_index=True)
+                    has_batter,has_pitcher=not batter_data.empty,not pitcher_data.empty
                 player_all=pd.concat([batter_data,pitcher_data],ignore_index=True) if (has_batter or has_pitcher) else pd.DataFrame(); analysis_header(f"{player_name} 선수 분석")
                 with st.container(border=True):
                     if has_pitcher:
