@@ -587,7 +587,7 @@ def toggle_favorite(player_id, player_name):
     return action
 
 def favorite_players():
-    return qdf("SELECT player_id, player_name FROM favorites ORDER BY saved_at DESC")
+    return qdf("SELECT player_id, player_name FROM favorites ORDER BY player_name COLLATE NOCASE ASC")
 
 
 
@@ -1581,6 +1581,11 @@ div[data-testid="stDataFrame"]{border-radius:14px;overflow:hidden}
 .home-intro-title{font-size:1.2rem;font-weight:800;margin-bottom:.35rem}
 .home-intro-text{color:#5f6368;line-height:1.55}
 
+/* 홈 관심 선수 버튼을 작고 촘촘하게 표시 */
+div[data-testid="stButton"] > button {
+    border-radius:999px;
+}
+
 /* 앱 전체 제목 옆 Streamlit 자동 링크(앵커) 아이콘 숨김 */
 [data-testid="stHeaderActionElements"]{
     display:none !important;
@@ -1655,13 +1660,14 @@ if nav == "홈":
     if favs.empty:
         st.caption("등록된 관심 선수가 없습니다. 선수 페이지에서 ☆ 관심 선수 등록을 눌러 추가할 수 있습니다.")
     else:
-        cols = st.columns(min(4, len(favs)))
+        # 가나다순으로 정렬된 관심 선수를 작고 촘촘한 버튼으로 표시
+        fav_cols = st.columns(6)
         for pos, (_, row) in enumerate(favs.iterrows()):
-            with cols[pos % len(cols)]:
+            with fav_cols[pos % 6]:
                 st.button(
                     f"★ {row['player_name']}",
                     key=f"home_fav_{row['player_id']}",
-                    use_container_width=True,
+                    use_container_width=False,
                     on_click=go_to,
                     args=("선수", row["player_name"])
                 )
