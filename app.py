@@ -1535,7 +1535,15 @@ if "presentation_mode" not in st.session_state:
 
 top1, top2 = st.columns([5,1])
 with top1:
-    st.markdown('<div class="brand">⚾ 찐팬의 데이터 덕아웃</div>', unsafe_allow_html=True)
+    st.markdown(
+        '''
+        <div class="brand">⚾ 찐팬의 데이터 덕아웃</div>
+        <div style="font-size:17px;font-weight:500;color:#7a7f8c;margin-top:2px;">
+            나만의 KBO 스카우팅 리포트
+        </div>
+        ''',
+        unsafe_allow_html=True
+    )
 
 with top2:
     st.session_state.presentation_mode = st.toggle("발표 모드", value=st.session_state.presentation_mode,
@@ -1558,30 +1566,7 @@ def go_to(page, player_name=None):
 gc.collect()
 
 if nav == "홈":
-    st.markdown(
-        """
-        <div style="margin-bottom:30px;">
-            <div style="
-                font-size:42px;
-                font-weight:800;
-                line-height:1.15;
-                color:#30323d;
-                margin-bottom:8px;
-            ">
-                찐팬의 데이터 덕아웃
-            </div>
-            <div style="
-                font-size:20px;
-                font-weight:500;
-                line-height:1.35;
-                color:#7a7f8c;
-            ">
-                나만의 KBO 스카우팅 리포트
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+
     loader = st.empty()
     with loader.container():
         show_center_loader()
