@@ -647,6 +647,68 @@ def avg_speed_value(df):
     return f"{s.mean():.1f} km/h" if not s.empty else "-"
 
 
+def percentile_value(df, key, value, higher_is_better=True):
+    """KBO 공식 기록 내 해당 지표의 백분위. 100에 가까울수록 우수."""
+    if df is None or df.empty or key not in df.columns or value is None:
+        return None
+    try:
+        v = float(value)
+    except Exception:
+        return None
+
+    s = pd.to_numeric(df[key], errors="coerce").dropna()
+    if s.empty:
+        return None
+
+    if higher_is_better:
+        pct = (s <= v).mean() * 100
+    else:
+        pct = (s >= v).mean() * 100
+    return round(float(pct), 1)
+
+
+def action_rate(df, target_actions):
+    if df is None or df.empty or "pitch_text" not in df.columns:
+        return None
+    acts = df["pitch_text"].apply(action)
+    if len(acts) == 0:
+        return None
+    return round(float(acts.isin(target_actions).mean() * 100), 1)
+
+
+def first_pitch_rate(df, target_actions):
+    if df is None or df.empty or "pitch_num" not in df.columns:
+        return None
+    first = df[pd.to_numeric(df["pitch_num"], errors="coerce") == 1].copy()
+    if first.empty:
+        return None
+    acts = first["pitch_text"].apply(action)
+    return round(float(acts.isin(target_actions).mean() * 100), 1)
+
+
+def speed_delta(latest_df, base_df):
+    """NAVER 최신 자료 평균구속 - Play-by-Play 기본자료 평균구속."""
+    if latest_df is None or latest_df.empty or base_df is None or base_df.empty:
+        return None
+    if "speed" not in latest_df.columns or "speed" not in base_df.columns:
+        return None
+    latest = pd.to_numeric(latest_df["speed"], errors="coerce").dropna()
+    base = pd.to_numeric(base_df["speed"], errors="coerce").dropna()
+    if latest.empty or base.empty:
+        return None
+    return round(float(latest.mean() - base.mean()), 1)
+
+
+def pct_text(v):
+    return f"{v:.1f}%" if v is not None else "-"
+
+
+def delta_text(v):
+    if v is None:
+        return "-"
+    return f"{v:+.1f} km/h"
+
+
 def data_source_status():
     base_p, base_g = base_data()
     _, naver_g = source_games()
@@ -1184,21 +1246,143 @@ elif nav == "선수":
                 kbo_hitters,kbo_pitchers=kbo_records(); kbo_hitter=find_kbo_player(kbo_hitters,player_name,player_team); kbo_pitcher=find_kbo_player(kbo_pitchers,player_name,player_team)
                 batter_data=allp[allp["batter_id"].astype(str)==str(player_id)].copy(); pitcher_data=allp[allp["pitcher_id"].astype(str)==str(player_id)].copy(); has_batter,has_pitcher=not batter_data.empty,not pitcher_data.empty
                 base_player_p,naver_player_p=source_pitches(); bp_batter=base_player_p[base_player_p["batter_id"].astype(str)==str(player_id)].copy() if not base_player_p.empty else pd.DataFrame(); bp_pitcher=base_player_p[base_player_p["pitcher_id"].astype(str)==str(player_id)].copy() if not base_player_p.empty else pd.DataFrame(); nv_batter=naver_player_p[naver_player_p["batter_id"].astype(str)==str(player_id)].copy() if not naver_player_p.empty else pd.DataFrame(); nv_pitcher=naver_player_p[naver_player_p["pitcher_id"].astype(str)==str(player_id)].copy() if not naver_player_p.empty else pd.DataFrame()
-                player_all=pd.concat([batter_data,pitcher_data],ignore_index=True) if (has_batter or has_pitcher) else pd.DataFrame(); analysis_header(f"{player_name} 선수 분석",analysis_period(player_all),"KBO 공식 기록 + NAVER Sports + 공개 Play-by-Play 자료를 근거로 구성")
+                player_all=pd.concat([batter_data,pitcher_data],ignore_index=True) if (has_batter or has_pitcher) else pd.DataFrame(); analysis_header(f"{player_name} 선수 분석")
                 with st.container(border=True):
                     if has_pitcher:
-                        top_pitch,_,top_share=top_pitch_info(pitcher_data); r1,r2,r3,r4=st.columns(4); r1.metric("KBO ERA",metric_value(kbo_pitcher,"ERA") if kbo_pitcher is not None else "-"); r2.metric("KBO WHIP",metric_value(kbo_pitcher,"WHIP") if kbo_pitcher is not None else "-"); r3.metric("평균 구속",avg_speed_value(pitcher_data)); r4.metric("주 사용 구종",top_pitch); st.caption(f"주 사용 구종 비율: {top_share:.1f}%" if top_pitch!="-" else "")
-                        mix=pitcher_data.groupby("pitch_type",dropna=True).agg(투구수=("pitch_id","count"),평균구속=("speed","mean")).reset_index()
-                        if not mix.empty: mix["평균구속"]=mix["평균구속"].round(1); st.markdown("#### 구종 구성"); st.bar_chart(mix.set_index("pitch_type")["투구수"]); st.dataframe(mix.sort_values("투구수",ascending=False),hide_index=True,use_container_width=True)
-                        loc=pitcher_data[["plate_x","plate_y","pitch_type"]].dropna(subset=["plate_x","plate_y"])
-                        if not loc.empty: st.markdown("#### 투구 위치"); st.scatter_chart(loc,x="plate_x",y="plate_y",color="pitch_type")
+                        top_pitch,_,top_share = top_pitch_info(pitcher_data)
+                        whiff_rate = action_rate(pitcher_data, ["헛스윙"])
+                        first_strike_rate = first_pitch_rate(
+                            pitcher_data,
+                            ["스트라이크","헛스윙","파울","인플레이"]
+                        )
+
+                        era_pct = None
+                        whip_pct = None
+                        if kbo_pitcher is not None:
+                            era_pct = percentile_value(
+                                kbo_pitchers, "ERA", kbo_pitcher.get("ERA"), higher_is_better=False
+                            )
+                            whip_pct = percentile_value(
+                                kbo_pitchers, "WHIP", kbo_pitcher.get("WHIP"), higher_is_better=False
+                            )
+
+                        recent_delta = speed_delta(nv_pitcher, bp_pitcher)
+
+                        st.markdown("#### 투수 분석 지표")
+                        r1,r2,r3 = st.columns(3)
+                        r1.metric("ERA 백분위", pct_text(era_pct))
+                        r2.metric("WHIP 백분위", pct_text(whip_pct))
+                        r3.metric("주력 구종", top_pitch)
+
+                        r4,r5,r6 = st.columns(3)
+                        r4.metric("주력 구종 비율", f"{top_share:.1f}%" if top_pitch != "-" else "-")
+                        r5.metric("헛스윙 유도율", pct_text(whiff_rate))
+                        r6.metric("초구 스트라이크 비율", pct_text(first_strike_rate))
+
+                        if recent_delta is not None:
+                            st.metric("NAVER 최신 구속 변화", delta_text(recent_delta))
+
+                        summary_parts = []
+                        if era_pct is not None and whip_pct is not None:
+                            summary_parts.append(
+                                f"KBO 공식 기록 기준 ERA 백분위 {era_pct:.1f}%, WHIP 백분위 {whip_pct:.1f}%"
+                            )
+                        if top_pitch != "-":
+                            summary_parts.append(f"전체 투구자료에서 {top_pitch} 사용 비율 {top_share:.1f}%")
+                        if whiff_rate is not None:
+                            summary_parts.append(f"헛스윙 유도율 {whiff_rate:.1f}%")
+                        if recent_delta is not None:
+                            summary_parts.append(
+                                f"NAVER 최신 자료의 평균 구속은 기본 Play-by-Play 대비 {recent_delta:+.1f} km/h"
+                            )
+                        if summary_parts:
+                            st.markdown("#### 분석 요약")
+                            st.write(" · ".join(summary_parts))
+
+                        mix=pitcher_data.groupby("pitch_type",dropna=True).agg(
+                            투구수=("pitch_id","count"),평균구속=("speed","mean")
+                        ).reset_index()
+                        if not mix.empty:
+                            mix["평균구속"]=mix["평균구속"].round(1)
+                            st.markdown("#### 구종 구성")
+                            st.bar_chart(mix.set_index("pitch_type")["투구수"])
+                            st.dataframe(
+                                mix.sort_values("투구수",ascending=False),
+                                hide_index=True,
+                                use_container_width=True
+                            )
+
+                        loc=pitcher_data[["plate_x","plate_y","pitch_type"]].dropna(
+                            subset=["plate_x","plate_y"]
+                        )
+                        if not loc.empty:
+                            st.markdown("#### 투구 위치")
+                            st.scatter_chart(loc,x="plate_x",y="plate_y",color="pitch_type")
+
                     if has_batter:
-                        top_seen,_,top_seen_share=top_pitch_info(batter_data); r1,r2,r3,r4=st.columns(4); r1.metric("KBO AVG",kbo_avg_value(kbo_hitter,"AVG") if kbo_hitter is not None else "-"); r2.metric("KBO HR",metric_value(kbo_hitter,"HR") if kbo_hitter is not None else "-"); r3.metric("상대 평균 구속",avg_speed_value(batter_data)); r4.metric("가장 많이 본 구종",top_seen); st.caption(f"가장 많이 본 구종 비율: {top_seen_share:.1f}%" if top_seen!="-" else "")
-                        d=batter_data.copy(); d["행동"]=d.pitch_text.apply(action); acts=d["행동"].value_counts().rename_axis("결과").reset_index(name="횟수")
-                        if not acts.empty: st.markdown("#### 투구 결과"); st.bar_chart(acts.set_index("결과")["횟수"])
+                        top_seen,_,top_seen_share = top_pitch_info(batter_data)
+                        batter_whiff = action_rate(batter_data, ["헛스윙"])
+                        first_swing = first_pitch_rate(
+                            batter_data,
+                            ["헛스윙","파울","인플레이"]
+                        )
+
+                        avg_pct = None
+                        gpa_pct = None
+                        if kbo_hitter is not None:
+                            avg_pct = percentile_value(
+                                kbo_hitters, "AVG", kbo_hitter.get("AVG"), higher_is_better=True
+                            )
+                            gpa_pct = percentile_value(
+                                kbo_hitters, "GPA", kbo_hitter.get("GPA"), higher_is_better=True
+                            )
+
+                        recent_seen_delta = speed_delta(nv_batter, bp_batter)
+
+                        st.markdown("#### 타자 분석 지표")
+                        r1,r2,r3 = st.columns(3)
+                        r1.metric("AVG 백분위", pct_text(avg_pct))
+                        r2.metric("GPA 백분위", pct_text(gpa_pct))
+                        r3.metric("가장 많이 본 구종", top_seen)
+
+                        r4,r5,r6 = st.columns(3)
+                        r4.metric("최다 상대 구종 비율", f"{top_seen_share:.1f}%" if top_seen != "-" else "-")
+                        r5.metric("헛스윙 비율", pct_text(batter_whiff))
+                        r6.metric("초구 스윙 비율", pct_text(first_swing))
+
+                        if recent_seen_delta is not None:
+                            st.metric("NAVER 최신 상대구속 변화", delta_text(recent_seen_delta))
+
+                        summary_parts = []
+                        if avg_pct is not None and gpa_pct is not None:
+                            summary_parts.append(
+                                f"KBO 공식 기록 기준 AVG 백분위 {avg_pct:.1f}%, GPA 백분위 {gpa_pct:.1f}%"
+                            )
+                        if top_seen != "-":
+                            summary_parts.append(
+                                f"전체 투구자료에서 가장 많이 상대한 구종은 {top_seen} ({top_seen_share:.1f}%)"
+                            )
+                        if batter_whiff is not None:
+                            summary_parts.append(f"헛스윙 비율 {batter_whiff:.1f}%")
+                        if recent_seen_delta is not None:
+                            summary_parts.append(
+                                f"NAVER 최신 자료의 상대 평균 구속은 기본 Play-by-Play 대비 {recent_seen_delta:+.1f} km/h"
+                            )
+                        if summary_parts:
+                            st.markdown("#### 분석 요약")
+                            st.write(" · ".join(summary_parts))
+
+                        d=batter_data.copy()
+                        d["행동"]=d.pitch_text.apply(action)
+                        acts=d["행동"].value_counts().rename_axis("결과").reset_index(name="횟수")
+                        if not acts.empty:
+                            st.markdown("#### 투구 결과")
+                            st.bar_chart(acts.set_index("결과")["횟수"])
+
                         m=d.groupby("pitch_type",dropna=True).size().reset_index(name="투구수")
-                        if not m.empty: st.markdown("#### 상대 구종"); st.bar_chart(m.set_index("pitch_type")["투구수"])
-                    nvg=pd.concat([nv_batter[["game_id"]] if not nv_batter.empty else pd.DataFrame(columns=["game_id"]),nv_pitcher[["game_id"]] if not nv_pitcher.empty else pd.DataFrame(columns=["game_id"])],ignore_index=True); st.caption(f"NAVER 최신 자료 반영: {nvg['game_id'].nunique() if not nvg.empty else 0}경기")
+                        if not m.empty:
+                            st.markdown("#### 상대 구종")
+                            st.bar_chart(m.set_index("pitch_type")["투구수"])
                 evidence_header()
                 st.markdown("### KBO 공식 기록"); st.caption("출처: KBO 공식 홈페이지")
                 if kbo_hitter is None and kbo_pitcher is None: st.info("연결된 KBO 공식 기록이 없습니다.")
