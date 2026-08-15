@@ -614,6 +614,11 @@ def analysis_period(df):
 def source_caption(text):
     st.caption(text)
 
+def kbo_record_year():
+    """KBO 공식 기록 파일명에서 시즌 연도를 읽어 표시."""
+    m = re.search(r"(20\d{2})", REPO_KBO_RECORDS.name)
+    return m.group(1) if m else None
+
 def top_pitch_info(df):
     if df is None or df.empty or "pitch_type" not in df.columns:
         return "-", 0, 0.0
@@ -924,21 +929,26 @@ def go_to(page, player_name=None):
         st.session_state.player_search = player_name
 
 
-games = all_games()
-if not games.empty:
-    games = games.sort_values(["game_date","saved_at"], ascending=[False,False], na_position="last")
-counts = current_counts()
+with st.spinner("화면을 불러오는 중입니다..."):
+    games = all_games()
+    if not games.empty:
+        games = games.sort_values(["game_date","saved_at"], ascending=[False,False], na_position="last")
+    counts = current_counts()
 
 if nav == "홈":
-    summary = overview_counts()
+    with st.spinner("홈 데이터를 정리하는 중입니다..."):
+        summary = overview_counts()
+        favs = favorite_players()
 
+    st.markdown("## DATA DUGOUT 현황")
     h1,h2 = st.columns(2)
-    h1.metric("분석 경기", summary["games"])
-    h2.metric("등록 선수", summary["players"])
+    h1.metric("분석 경기", f"{summary['games']:,}")
+    h2.metric("등록 선수", f"{summary['players']:,}")
 
-    favs = favorite_players()
-    if not favs.empty:
-        st.markdown("### 관심 선수")
+    st.markdown("### ⭐ 관심 선수")
+    if favs.empty:
+        st.caption("등록된 관심 선수가 없습니다. 선수 페이지에서 ☆ 관심 선수 등록을 눌러 추가할 수 있습니다.")
+    else:
         cols = st.columns(min(4, len(favs)))
         for pos, (_, row) in enumerate(favs.iterrows()):
             with cols[pos % len(cols)]:
@@ -950,13 +960,28 @@ if nav == "홈":
                     args=("선수", row["player_name"])
                 )
 
+    st.markdown("### 최근 경기")
+    if games.empty:
+        st.caption("표시할 경기 자료가 없습니다.")
+    else:
+        recent = games[["game_date","away_team","home_team"]].drop_duplicates().head(5).copy()
+        recent.columns = ["날짜","원정","홈"]
+        st.dataframe(
+            recent,
+            hide_index=True,
+            use_container_width=True,
+            height=min(250, 38 * (len(recent) + 1))
+        )
+
 elif nav == "데이터":
     st.markdown("## 데이터")
 
     status = data_source_status()
     st.markdown("### 데이터 연결 상태")
     s1,s2,s3 = st.columns(3)
-    s1.metric("KBO 공식 기록", "연결됨" if status["kbo"] else "미연결")
+    kbo_year = kbo_record_year()
+    kbo_label = f"{kbo_year} 정규시즌" if status["kbo"] and kbo_year else ("자료 확인됨" if status["kbo"] else "자료 없음")
+    s1.metric("KBO 공식 기록", kbo_label)
     s2.metric("NAVER 최신 자료", f"{status['naver_games']}경기")
     s3.metric("Play-by-Play 자료", f"{status['base_games']}경기")
 
@@ -1011,7 +1036,11 @@ elif nav == "데이터":
 
 elif nav == "팀":
     st.markdown("## 팀")
-    allp=all_pitches(); allg=all_games(); base_p,naver_p=source_pitches(); base_g,naver_g=source_games()
+    with st.spinner("팀 분석 자료를 불러오는 중입니다..."):
+        allp=all_pitches()
+        allg=all_games()
+        base_p,naver_p=source_pitches()
+        base_g,naver_g=source_games()
     present=sorted(set(allg.away_team.dropna()).union(set(allg.home_team.dropna()))) if not allg.empty else []
     priority=[t for t in PRIORITY_TEAMS if t in present]; options=priority+[t for t in present if t not in priority]
     if not options: st.info("데이터를 먼저 추가해 주세요.")
@@ -1044,7 +1073,8 @@ elif nav == "팀":
         p1,p2,p3=st.columns(3); p1.metric("경기",bp_team_games["game_id"].nunique() if not bp_team_games.empty else 0); p2.metric("투수진 투구",len(bp_thrown)); p3.metric("타선이 본 투구",len(bp_seen)); st.caption(f"자료 기간: {analysis_period(bp_team_games) or '-'}"); st.caption("출처: 공개 Play-by-Play 데이터셋")
 
 elif nav == "선수":
-    allp=all_pitches()
+    with st.spinner("선수 자료를 불러오는 중입니다..."):
+        allp=all_pitches()
     if allp.empty: st.info("데이터를 먼저 추가해 주세요.")
     else:
         batter_rows=allp[["batter_id","batter_name","offense_team","game_date"]].rename(columns={"batter_id":"id","batter_name":"name","offense_team":"team","game_date":"game_date"}); batter_rows["role"]="타자"
