@@ -1984,16 +1984,31 @@ elif nav == "팀":
                     return None
 
             def _rank_of(df0, team_name, col, higher_is_better=True):
+                """10개 구단 순위를 계산하되 같은 값은 공동 순위로 처리."""
                 if df0 is None or df0.empty or "팀명" not in df0.columns or col not in df0.columns:
                     return "-"
+
                 d = df0[["팀명", col]].copy()
+                d["팀명"] = d["팀명"].fillna("").astype(str).str.strip()
                 d[col] = pd.to_numeric(d[col], errors="coerce")
-                d = d.dropna(subset=[col])
+                d = d[(d["팀명"] != "") & d[col].notna()].copy()
+
                 if d.empty:
                     return "-"
-                d = d.sort_values(col, ascending=not higher_is_better, kind="mergesort").reset_index(drop=True)
-                matches = d.index[d["팀명"].astype(str).str.strip() == team_name].tolist()
-                return matches[0] + 1 if matches else "-"
+
+                # pandas rank(method="min"):
+                # 같은 값은 같은 순위를 부여하고, 다음 순위는 건너뜀.
+                # 예: 1위, 공동 2위, 공동 2위, 4위
+                d["_rank"] = d[col].rank(
+                    method="min",
+                    ascending=not higher_is_better
+                ).astype(int)
+
+                row = d[d["팀명"] == str(team_name).strip()]
+                if row.empty:
+                    return "-"
+
+                return int(row.iloc[0]["_rank"])
 
             def _per_game(row, num_col):
                 if row is None:
@@ -2020,45 +2035,79 @@ elif nav == "팀":
             runs_pg = _per_game(_hr, "R")
             hr_pg = _per_game(_hr, "HR")
 
+            def _rank_label(df0, team_name, col, rank_value):
+                """같은 기록의 팀이 2개 이상이면 '공동 n위'로 표시."""
+                if rank_value == "-" or df0 is None or df0.empty or col not in df0.columns or "팀명" not in df0.columns:
+                    return None
+
+                d = df0[["팀명", col]].copy()
+                d["팀명"] = d["팀명"].fillna("").astype(str).str.strip()
+                d[col] = pd.to_numeric(d[col], errors="coerce")
+                d = d[(d["팀명"] != "") & d[col].notna()].copy()
+
+                row = d[d["팀명"] == str(team_name).strip()]
+                if row.empty:
+                    return f"리그 {rank_value}위"
+
+                value = row.iloc[0][col]
+                tied = int((d[col] == value).sum()) > 1
+                return f"리그 공동 {rank_value}위" if tied else f"리그 {rank_value}위"
+
+            # 경기당 지표는 임시 계산 컬럼을 포함한 데이터프레임을 다시 준비
+            _th_runs = _th.assign(
+                R_G=pd.to_numeric(_th.get("R"), errors="coerce") / pd.to_numeric(_th.get("G"), errors="coerce")
+            ) if not _th.empty else _th
+            _th_hr = _th.assign(
+                HR_G=pd.to_numeric(_th.get("HR"), errors="coerce") / pd.to_numeric(_th.get("G"), errors="coerce")
+            ) if not _th.empty else _th
+
+            avg_rank_label = _rank_label(_th, team, "AVG", avg_rank)
+            runs_rank_label = _rank_label(_th_runs, team, "R_G", runs_rank)
+            hr_rank_label = _rank_label(_th_hr, team, "HR_G", hr_rank)
+            era_rank_label = _rank_label(_tp, team, "ERA", era_rank)
+            whip_rank_label = _rank_label(_tp, team, "WHIP", whip_rank)
+            fpct_rank_label = _rank_label(_td, team, "FPCT", fpct_rank)
+            sbpct_rank_label = _rank_label(_tr, team, "SB%", sbpct_rank)
+
             st.markdown("#### DATA DUGOUT 팀 프로필")
             p1,p2,p3,p4 = st.columns(4)
             p1.metric(
                 "공격 정확도",
                 f"타율 {kbo_avg_value(_hr, 'AVG')}" if _hr is not None else "-",
-                f"리그 {avg_rank}위" if avg_rank != "-" else None
+                avg_rank_label
             )
             p2.metric(
                 "득점 생산",
                 f"{runs_pg:.2f}점/경기" if runs_pg is not None else "-",
-                f"리그 {runs_rank}위" if runs_rank != "-" else None
+                runs_rank_label
             )
             p3.metric(
                 "장타 생산",
                 f"{hr_pg:.2f}HR/경기" if hr_pg is not None else "-",
-                f"리그 {hr_rank}위" if hr_rank != "-" else None
+                hr_rank_label
             )
             p4.metric(
                 "실점 억제",
                 f"ERA {metric_value(_pr, 'ERA')}" if _pr is not None else "-",
-                f"리그 {era_rank}위" if era_rank != "-" else None
+                era_rank_label
             )
 
             p1,p2,p3,p4 = st.columns(4)
             p1.metric(
                 "출루 허용",
                 f"WHIP {metric_value(_pr, 'WHIP')}" if _pr is not None else "-",
-                f"리그 {whip_rank}위" if whip_rank != "-" else None
+                whip_rank_label
             )
             p2.metric(
                 "수비 안정성",
                 f"FPCT {metric_value(_dr, 'FPCT')}" if _dr is not None else "-",
-                f"리그 {fpct_rank}위" if fpct_rank != "-" else None
+                fpct_rank_label
             )
             _sb = metric_value(_rr, "SB%") if _rr is not None else "-"
             p3.metric(
                 "주루 성공률",
                 f"{_sb}%" if _sb != "-" else "-",
-                f"리그 {sbpct_rank}위" if sbpct_rank != "-" else None
+                sbpct_rank_label
             )
             p4.metric(
                 "투구 성향",
@@ -2069,13 +2118,13 @@ elif nav == "팀":
             # 원자료를 조합한 짧은 해석: 사실 기반 순위/비율만 사용
             insights = []
             if avg_rank != "-":
-                insights.append(f"팀 타율은 리그 {avg_rank}위")
+                insights.append(f"팀 타율은 {avg_rank_label}")
             if era_rank != "-":
-                insights.append(f"팀 ERA는 리그 {era_rank}위")
+                insights.append(f"팀 ERA는 {era_rank_label}")
             if fpct_rank != "-":
-                insights.append(f"수비율은 리그 {fpct_rank}위")
+                insights.append(f"수비율은 {fpct_rank_label}")
             if sbpct_rank != "-":
-                insights.append(f"도루 성공률은 리그 {sbpct_rank}위")
+                insights.append(f"도루 성공률은 {sbpct_rank_label}")
             if top_throw != "-":
                 insights.append(f"투수진은 {top_throw}을 가장 많이 사용({top_throw_share:.1f}%)")
             if top_seen != "-":
