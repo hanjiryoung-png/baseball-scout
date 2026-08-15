@@ -1673,12 +1673,14 @@ if "main_nav" not in st.session_state or st.session_state.main_nav not in nav_it
     st.session_state.main_nav = "홈"
 nav = st.radio("메인 메뉴", nav_items, horizontal=True, label_visibility="collapsed", key="main_nav")
 
-def go_to(page, player_name=None, team_name=None):
+def go_to(page, player_name=None, team_name=None, player_id=None):
     st.session_state.main_nav = page
     if player_name is not None:
         st.session_state.player_search = player_name
     if team_name is not None:
         st.session_state.team_select = team_name
+    if player_id is not None:
+        st.session_state.selected_player_id = str(player_id)
 
 
 gc.collect()
@@ -1714,7 +1716,7 @@ if nav == "홈":
                     key=f"home_fav_{row['player_id']}",
                     use_container_width=False,
                     on_click=go_to,
-                    args=("선수", row["player_name"])
+                    args=("선수", row["player_name"], None, row["player_id"])
                 )
 
     st.markdown("### ⚾ 관심 팀")
@@ -2342,12 +2344,20 @@ elif nav == "선수":
                         key=f"player_page_fav_{row['player_id']}",
                         use_container_width=False,
                         on_click=go_to,
-                        args=("선수", row["player_name"])
+                        args=("선수", row["player_name"], None, row["player_id"])
                     )
 
         st.markdown("### 선수 찾기")
         if "player_search" not in st.session_state: st.session_state.player_search=""
-        search_name=st.text_input("🔍 이름 검색",placeholder="선수 이름을 입력하세요",key="player_search").strip(); st.caption("이름으로 바로 검색하거나, 아래 필터로 선수 목록을 좁혀볼 수 있습니다.")
+        search_name=st.text_input("🔍 이름 검색",placeholder="선수 이름을 입력하세요",key="player_search").strip()
+        st.caption("이름으로 바로 검색하거나, 아래 필터로 선수 목록을 좁혀볼 수 있습니다.")
+
+        # 사용자가 직접 검색어를 바꾸면 이전에 클릭했던 특정 선수 ID 선택은 해제
+        prev_search = st.session_state.get("_last_player_search", "")
+        if search_name != prev_search:
+            if "_last_player_search" in st.session_state:
+                st.session_state.selected_player_id = ""
+            st.session_state._last_player_search = search_name
         f1,f2=st.columns(2); teams=["전체"]+[t for t in ["KT","LG","삼성","두산","KIA","NC","SSG","롯데","키움","한화"] if t in set(players["team"])]
         with f1: team_filter=st.selectbox("구단",teams)
         with f2: role_filter=st.selectbox("구분",["전체","투수","타자"])
@@ -2365,13 +2375,24 @@ elif nav == "선수":
 
             player_id=player_name=player_team=player_role=None
 
-            if direct:
+            selected_pid = str(st.session_state.get("selected_player_id", "") or "").strip()
+
+            # 동일 이름 선수가 여러 명이어도 클릭한 선수 ID를 우선 사용
+            if selected_pid:
+                picked = players[players["id"].astype(str) == selected_pid]
+                if not picked.empty:
+                    only = picked.iloc[0]
+                    player_id,player_name,player_team,player_role = (
+                        str(only["id"]), only["name"], only["team"], only["role"]
+                    )
+
+            if player_id is None and direct:
                 only=filtered.iloc[0]
                 player_id,player_name,player_team,player_role = (
                     str(only["id"]), only["name"], only["team"], only["role"]
                 )
 
-            elif filter_used:
+            elif player_id is None and filter_used:
                 st.caption(f"선수 {len(filtered):,}명 · 이름을 클릭하면 바로 분석합니다.")
 
                 # 기존 '분석할 선수 선택' 드롭다운을 없애고
@@ -2384,7 +2405,7 @@ elif nav == "선수":
                             key=f"player_result_{row['id']}_{pos}",
                             use_container_width=True,
                             on_click=go_to,
-                            args=("선수", row["name"])
+                            args=("선수", row["name"], None, row["id"])
                         )
             if player_id is not None:
                 st.markdown(f"### {player_name}"); st.caption(" · ".join([x for x in [player_team,player_role] if x])); fav_now=is_favorite(player_id)
