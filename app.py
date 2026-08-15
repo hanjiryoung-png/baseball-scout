@@ -862,6 +862,33 @@ def load_base_player_subset(path_text, modified_ns, player_id):
     return _normalize_base_subset(raw)
 
 
+@st.cache_data(show_spinner=False, max_entries=12)
+def load_base_game_subset(path_text, modified_ns, game_id):
+    """선택한 경기 한 경기만 Parquet에서 읽음."""
+    if not path_text:
+        return pd.DataFrame(), pd.DataFrame()
+
+    gid = str(game_id)
+    try:
+        raw = pd.read_parquet(
+            path_text,
+            columns=BASE_COLUMNS,
+            filters=[[("game_pk", "==", gid)]]
+        )
+    except Exception:
+        # game_pk가 숫자형인 parquet도 고려
+        try:
+            raw = pd.read_parquet(
+                path_text,
+                columns=BASE_COLUMNS,
+                filters=[[("game_pk", "==", int(gid))]]
+            )
+        except Exception:
+            return pd.DataFrame(), pd.DataFrame()
+
+    return _normalize_base_subset(raw)
+
+
 @st.cache_data(show_spinner=False, max_entries=6)
 def load_base_team_subset(path_text, modified_ns, team):
     """선택한 팀이 출전한 경기 행만 Parquet에서 읽음."""
@@ -896,6 +923,153 @@ def base_team_data(team):
         return pd.DataFrame(), pd.DataFrame()
     stat = path.stat()
     return load_base_team_subset(str(path), stat.st_mtime_ns, str(team))
+
+
+def base_game_data(game_id):
+    path = get_base_parquet_path()
+    if path is None:
+        return pd.DataFrame(), pd.DataFrame()
+    stat = path.stat()
+    return load_base_game_subset(str(path), stat.st_mtime_ns, str(game_id))
+
+
+def open_home_game_detail(game_id, source_kind):
+    st.session_state.home_game_detail_id = str(game_id)
+    st.session_state.home_game_detail_source = str(source_kind)
+
+
+def close_home_game_detail():
+    st.session_state.home_game_detail_id = ""
+    st.session_state.home_game_detail_source = ""
+
+
+def game_detail_data(game_id, source_kind):
+    """선택한 경기의 투구자료/경기정보를 현재 저장 구조에서 읽음."""
+    gid = str(game_id)
+
+    if str(source_kind) == "NAVER":
+        pitches = qdf("""
+            SELECT p.*, g.game_date, g.away_team, g.home_team
+            FROM pitches p
+            LEFT JOIN games g ON p.game_id = g.game_id
+            WHERE p.game_id = ?
+        """, (gid,))
+        games = qdf("""
+            SELECT game_id, game_date, away_team, home_team
+            FROM games
+            WHERE game_id = ?
+        """, (gid,))
+        return pitches, games
+
+    return base_game_data(gid)
+
+
+def render_home_game_detail(game_id, source_kind):
+    pitches, games = game_detail_data(game_id, source_kind)
+
+    if games is None or games.empty:
+        st.warning("해당 경기 자료를 찾지 못했습니다.")
+        st.button("← 홈으로", on_click=close_home_game_detail)
+        return
+
+    g = games.iloc[0]
+    away = str(g.get("away_team", ""))
+    home = str(g.get("home_team", ""))
+    game_date = str(g.get("game_date", ""))[:10]
+
+    # 최종 스코어
+    score_text = "-"
+    if str(source_kind) == "NAVER":
+        if not st.session_state.presentation_mode:
+            score_text = naver_final_score(game_id) or "-"
+    else:
+        # PBP 상세 subset에는 점수 컬럼이 없으므로 홈 최근 경기 summary에서 찾음
+        try:
+            rg = recent_games_light(50)
+            hit = rg[rg["game_id"].astype(str) == str(game_id)]
+            if not hit.empty:
+                r = hit.iloc[0]
+                a = r.get("away_score")
+                h = r.get("home_score")
+                if pd.notna(a) and pd.notna(h):
+                    score_text = f"{int(a)} : {int(h)}"
+        except Exception:
+            pass
+
+    st.button("← 홈으로", on_click=close_home_game_detail)
+
+    st.markdown(
+        f'<div class="recent-game-detail-title">{away} {score_text} {home}</div>',
+        unsafe_allow_html=True
+    )
+    st.markdown(
+        f'<div class="recent-game-detail-sub">{game_date} · 출처: {"NAVER 최신 자료" if str(source_kind)=="NAVER" else "Play-by-Play 자료"}</div>',
+        unsafe_allow_html=True
+    )
+
+    if pitches is None or pitches.empty:
+        st.info("이 경기의 세부 투구 자료가 없습니다.")
+        return
+
+    c1,c2,c3,c4 = st.columns(4)
+    c1.metric("투구 수", f"{len(pitches):,}")
+    c2.metric("투수", f"{pitches['pitcher_id'].astype(str).replace('', pd.NA).dropna().nunique():,}")
+    c3.metric("타자", f"{pitches['batter_id'].astype(str).replace('', pd.NA).dropna().nunique():,}")
+    c4.metric("이닝", f"{pd.to_numeric(pitches['inning'], errors='coerce').max():.0f}" if 'inning' in pitches.columns else "-")
+
+    st.markdown("#### 투수별 투구")
+    pitcher_summary = (
+        pitches.groupby(["pitcher_name"], dropna=True)
+        .agg(
+            투구수=("pitch_id","count"),
+            평균구속=("speed","mean")
+        )
+        .reset_index()
+        .rename(columns={"pitcher_name":"투수"})
+    )
+    if not pitcher_summary.empty:
+        pitcher_summary["평균구속"] = pitcher_summary["평균구속"].round(1)
+        st.dataframe(
+            pitcher_summary.sort_values("투구수", ascending=False),
+            hide_index=True,
+            use_container_width=True
+        )
+
+    st.markdown("#### 타자별 결과")
+    batter_summary = (
+        pitches.groupby(["batter_name"], dropna=True)
+        .agg(
+            본투구=("pitch_id","count")
+        )
+        .reset_index()
+        .rename(columns={"batter_name":"타자"})
+    )
+    if not batter_summary.empty:
+        st.dataframe(
+            batter_summary.sort_values("본투구", ascending=False),
+            hide_index=True,
+            use_container_width=True
+        )
+
+    if "pitch_type" in pitches.columns:
+        st.markdown("#### 구종 구성")
+        mix = (
+            pitches.groupby("pitch_type", dropna=True)
+            .agg(
+                투구수=("pitch_id","count"),
+                평균구속=("speed","mean")
+            )
+            .reset_index()
+        )
+        if not mix.empty:
+            mix["평균구속"] = mix["평균구속"].round(1)
+            st.bar_chart(mix.set_index("pitch_type")["투구수"])
+            st.dataframe(
+                mix.sort_values("투구수", ascending=False),
+                hide_index=True,
+                use_container_width=True
+            )
+
 
 def base_data():
     path = get_base_parquet_path()
@@ -1891,6 +2065,34 @@ div[data-testid="stDataFrame"]{
     line-height:1.5;
 }
 
+/* 홈 최근 경기 클릭형 목록 */
+.recent-game-head{
+    display:grid;
+    grid-template-columns:1.15fr 1fr 1fr .8fr;
+    gap:0;
+    padding:10px 14px;
+    border:1px solid #e2e8f0;
+    border-bottom:none;
+    border-radius:12px 12px 0 0;
+    background:#f8fafc;
+    color:#64748b;
+    font-size:.85rem;
+    font-weight:600;
+}
+.recent-game-detail-title{
+    margin-top:1.2rem;
+    margin-bottom:.35rem;
+    font-size:1.72rem;
+    font-weight:800;
+    letter-spacing:-.04em;
+    color:#102a43;
+}
+.recent-game-detail-sub{
+    color:#64748b;
+    font-size:.92rem;
+    margin-bottom:1.2rem;
+}
+
 
 /* 홈 관심 선수 버튼을 작고 촘촘하게 표시 */
 div[data-testid="stButton"] > button {
@@ -1976,6 +2178,13 @@ def go_to(page, player_name=None, team_name=None, player_id=None):
 gc.collect()
 
 if nav == "홈":
+
+    if st.session_state.get("home_game_detail_id"):
+        render_home_game_detail(
+            st.session_state.home_game_detail_id,
+            st.session_state.get("home_game_detail_source", "PBP")
+        )
+        st.stop()
 
     loader = st.empty()
     with loader.container():
@@ -2064,15 +2273,29 @@ if nav == "홈":
             return score or "-"
 
         recent["스코어"] = recent.apply(_home_score, axis=1)
-        recent = recent[["game_date","away_team","home_team","스코어"]]
-        recent.columns = ["날짜","원정","홈","스코어"]
 
-        st.dataframe(
-            recent,
-            hide_index=True,
-            use_container_width=True,
-            height=min(250, 38 * (len(recent) + 1))
+        st.markdown(
+            """
+            <div class="recent-game-head">
+                <div>날짜</div><div>원정</div><div>홈</div><div>스코어</div>
+            </div>
+            """,
+            unsafe_allow_html=True
         )
+
+        for pos, (_, row) in enumerate(recent.iterrows()):
+            label = (
+                f"{row['game_date']}   ·   "
+                f"{row['away_team']}   vs   {row['home_team']}   ·   "
+                f"{row['스코어']}"
+            )
+            st.button(
+                label,
+                key=f"recent_game_{row['game_id']}_{pos}",
+                use_container_width=True,
+                on_click=open_home_game_detail,
+                args=(row["game_id"], row["source_kind"])
+            )
 
 elif nav == "데이터":
     st.markdown(
