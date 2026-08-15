@@ -370,16 +370,6 @@ def init_db():
     CREATE INDEX IF NOT EXISTS ix_pitches_offense ON pitches(offense_team);
     CREATE INDEX IF NOT EXISTS ix_pitches_defense ON pitches(defense_team);
     """)
-    # 최근 경기 스코어 표시용 컬럼.
-    # 기존 Persistent Disk DB도 그대로 유지하면서 필요한 컬럼만 안전하게 추가합니다.
-    existing_game_cols = {
-        row[1] for row in c.execute("PRAGMA table_info(games)").fetchall()
-    }
-    if "away_score" not in existing_game_cols:
-        c.execute("ALTER TABLE games ADD COLUMN away_score INTEGER")
-    if "home_score" not in existing_game_cols:
-        c.execute("ALTER TABLE games ADD COLUMN home_score INTEGER")
-
     c.commit()
     c.close()
 
@@ -455,8 +445,7 @@ def infer_max_inning(payload):
     return max(nums) if nums else 9
 
 
-def _score_value(v):
-    """NAVER inningScore 값의 여러 형태를 숫자로 안전하게 변환."""
+def _score_number(v):
     if isinstance(v, dict):
         for key in ("score", "run", "runs", "value"):
             if key in v:
@@ -470,26 +459,33 @@ def _score_value(v):
         return 0
 
 
-def final_score_from_payload(payload):
-    """NAVER 문자중계 payload의 이닝별 득점을 합산해 (원정, 홈) 최종 스코어 반환."""
-    tr = payload.get("result",{}).get("textRelayData",{}) or {}
-    inning_score = tr.get("inningScore",{}) or {}
+@st.cache_data(ttl=3600, show_spinner=False)
+def naver_final_score(game_id):
+    """홈 최근 경기의 NAVER 실제 최종 스코어 표시 전용."""
+    try:
+        payload = request_inning(str(game_id), 1)
+        tr = payload.get("result",{}).get("textRelayData",{}) or {}
+        inning_score = tr.get("inningScore",{}) or {}
 
-    totals = {}
-    for side in ("away", "home"):
-        side_scores = inning_score.get(side,{}) or {}
-        total = 0
-        found = False
-        for k, v in side_scores.items():
-            try:
-                int(k)  # 1,2,3... 이닝 키만 합산
-            except Exception:
-                continue
-            total += _score_value(v)
-            found = True
-        totals[side] = total if found else None
+        totals = {}
+        for side in ("away", "home"):
+            side_scores = inning_score.get(side,{}) or {}
+            total = 0
+            found = False
+            for inning_key, value in side_scores.items():
+                try:
+                    int(inning_key)
+                except Exception:
+                    continue
+                total += _score_number(value)
+                found = True
+            totals[side] = total if found else None
 
-    return totals.get("away"), totals.get("home")
+        if totals.get("away") is None or totals.get("home") is None:
+            return None
+        return f"{totals['away']} : {totals['home']}"
+    except Exception:
+        return None
 
 
 def player_map(tr):
@@ -585,23 +581,12 @@ def collect_game(text):
         for row in extract(payload, gid, away, home):
             all_rows[row[0]] = row
 
-    # 첫 payload의 inningScore에는 경기 전체 이닝 스코어가 포함되므로
-    # 새 경기 저장 시 최종 스코어도 함께 보관합니다.
-    away_score, home_score = final_score_from_payload(first)
-
     c = db()
     try:
         c.execute("BEGIN")
         c.execute(
-            """INSERT INTO games(
-                game_id,game_date,away_team,home_team,source,saved_at,innings,demo_ready,
-                away_score,home_score
-            ) VALUES(?,?,?,?,?,?,?,1,?,?)""",
-            (
-                gid, date_from_gid(gid), away, home, text,
-                datetime.now().isoformat(timespec="seconds"), max_inn,
-                away_score, home_score
-            )
+            "INSERT INTO games(game_id,game_date,away_team,home_team,source,saved_at,innings,demo_ready) VALUES(?,?,?,?,?,?,?,1)",
+            (gid, date_from_gid(gid), away, home, text, datetime.now().isoformat(timespec="seconds"), max_inn)
         )
         c.executemany(
             "INSERT OR IGNORE INTO pitches VALUES(" + ",".join(["?"]*21) + ")",
@@ -1143,7 +1128,7 @@ def load_home_base_summary(path_text, modified_ns):
     if not path_text:
         return {
             "game_ids": set(),
-            "recent_games": pd.DataFrame(columns=["game_date","away_team","home_team","away_score","home_score"]),
+            "recent_games": pd.DataFrame(columns=["game_date","away_team","home_team"]),
             "players": pd.DataFrame(columns=["player_id","player_name","team"]),
         }
 
@@ -1151,7 +1136,7 @@ def load_home_base_summary(path_text, modified_ns):
     if not path.exists():
         return {
             "game_ids": set(),
-            "recent_games": pd.DataFrame(columns=["game_date","away_team","home_team","away_score","home_score"]),
+            "recent_games": pd.DataFrame(columns=["game_date","away_team","home_team"]),
             "players": pd.DataFrame(columns=["player_id","player_name","team"]),
         }
 
@@ -1176,43 +1161,6 @@ def load_home_base_summary(path_text, modified_ns):
         "home_team": home,
     }).drop_duplicates("game_id")
 
-    # 공개 Play-by-Play에 스코어 컬럼이 있으면 최근 경기 표에 활용합니다.
-    # 데이터셋 버전에 따라 컬럼명이 다를 수 있어 대표적인 이름을 순서대로 확인합니다.
-    score_pairs = [
-        ("away_score", "home_score"),
-        ("post_away_score", "post_home_score"),
-        ("away_final_score", "home_final_score"),
-        ("away_runs", "home_runs"),
-    ]
-    score_frame = None
-    for away_col, home_col in score_pairs:
-        try:
-            sraw = pd.read_parquet(
-                path,
-                columns=["game_pk", away_col, home_col]
-            )
-            sraw[away_col] = pd.to_numeric(sraw[away_col], errors="coerce")
-            sraw[home_col] = pd.to_numeric(sraw[home_col], errors="coerce")
-            score_frame = (
-                sraw.groupby(sraw["game_pk"].astype(str), as_index=False)
-                    .agg({away_col:"max", home_col:"max"})
-                    .rename(columns={
-                        "game_pk":"game_id",
-                        away_col:"away_score",
-                        home_col:"home_score"
-                    })
-            )
-            score_frame["game_id"] = score_frame["game_id"].astype(str)
-            break
-        except Exception:
-            continue
-
-    if score_frame is not None and not score_frame.empty:
-        games = games.merge(score_frame, on="game_id", how="left")
-    else:
-        games["away_score"] = pd.NA
-        games["home_score"] = pd.NA
-
     # 선수는 필요한 3개 열만 남기고 즉시 중복 제거
     pitchers = pd.DataFrame({
         "player_id": raw["pitcher"].fillna("").astype(str).str.strip(),
@@ -1233,9 +1181,12 @@ def load_home_base_summary(path_text, modified_ns):
         (players["player_name"].str.lower() != "nan")
     ].drop_duplicates(["player_id","player_name","team","role"])
 
+    recent_games = games[["game_id","game_date","away_team","home_team"]].copy()
+    recent_games["source_kind"] = "PBP"
+
     return {
         "game_ids": set(games["game_id"].astype(str)),
-        "recent_games": games[["game_date","away_team","home_team","away_score","home_score"]],
+        "recent_games": recent_games,
         "players": players,
     }
 
@@ -1461,32 +1412,18 @@ def overview_counts():
     }
 
 
-def home_data_period():
-    """홈 현황용 Play-by-Play 자료 기간."""
-    path_text, modified_ns = _base_file_signature()
-    base = load_home_base_summary(path_text, modified_ns)
-    g = base.get("recent_games")
-    if g is None or g.empty or "game_date" not in g.columns:
-        return "-"
-    dates = pd.to_datetime(g["game_date"], errors="coerce").dropna()
-    if dates.empty:
-        return "-"
-    return f"{dates.min():%Y.%m.%d} ~ {dates.max():%Y.%m.%d}"
-
-
 def recent_games_light(limit=5):
     """홈의 최근 경기 표 전용. 전체 투구 데이터는 읽지 않습니다."""
     path_text, modified_ns = _base_file_signature()
     base = load_home_base_summary(path_text, modified_ns)
     base_games = base["recent_games"].copy()
 
-    nav = qdf(
-        "SELECT game_id, game_date, away_team, home_team, away_score, home_score FROM games"
-    )
+    nav = qdf("SELECT game_id, game_date, away_team, home_team FROM games")
     if nav is not None and not nav.empty:
         if base["game_ids"]:
             nav = nav[~nav["game_id"].astype(str).isin(base["game_ids"])].copy()
-        nav = nav[["game_date","away_team","home_team","away_score","home_score"]]
+        nav = nav[["game_id","game_date","away_team","home_team"]]
+        nav["source_kind"] = "NAVER"
         games = pd.concat([base_games, nav], ignore_index=True)
     else:
         games = base_games
@@ -1699,8 +1636,29 @@ st.markdown("""
 footer{visibility:hidden}
 header{visibility:hidden}
 .block-container{max-width:1180px;padding-top:1.5rem;padding-bottom:3rem}
-.brand{font-size:2.2rem;font-weight:850;letter-spacing:-1.2px;margin-bottom:.1rem}
-.tagline{font-size:1rem;color:#707070;margin-bottom:1.35rem}
+.brand-wrap{
+    display:inline-block;
+    width:max-content;
+    margin-bottom:1.2rem;
+}
+.brand{
+    font-size:2.2rem;
+    font-weight:850;
+    letter-spacing:-1.2px;
+    color:#102a43;
+    line-height:1.15;
+    margin-bottom:.25rem;
+}
+.tagline{
+    width:100%;
+    display:flex;
+    justify-content:space-between;
+    gap:.55rem;
+    font-size:1rem;
+    font-weight:500;
+    color:#6b7280;
+    white-space:nowrap;
+}
 .mode{font-size:.85rem;padding:.35rem .65rem;border-radius:999px;border:1px solid #ddd;display:inline-block}
 div[data-testid="stMetric"]{border:1px solid #ececec;border-radius:18px;padding:16px;background:#fff}
 div[data-testid="stDataFrame"]{border-radius:14px;overflow:hidden}
@@ -1734,75 +1692,59 @@ div[data-testid="stDataFrame"]{border-radius:14px;overflow:hidden}
 .home-intro-title{font-size:1.2rem;font-weight:800;margin-bottom:.35rem}
 .home-intro-text{color:#5f6368;line-height:1.55}
 
-/* 홈 관심 선수/팀 버튼을 작고 촘촘하게 표시 */
-div[data-testid="stButton"] > button {
-    border-radius:999px;
-}
-
-/* Lovable 참고 홈 화면 디자인 */
-.home-hero{
-    margin-top:1.8rem;
-    margin-bottom:1.5rem;
-}
-.home-hero-title{
-    font-size:2.15rem;
-    font-weight:850;
-    letter-spacing:-.045em;
+.home-status-title{
+    margin-top:2.2rem;
+    margin-bottom:1.35rem;
+    font-size:1.72rem;
+    font-weight:800;
+    letter-spacing:-.04em;
     color:#111827;
-    margin-bottom:.45rem;
-}
-.home-hero-desc{
-    font-size:.98rem;
-    color:#64748b;
-    line-height:1.55;
 }
 .home-stat-grid{
     display:grid;
-    grid-template-columns:repeat(3,minmax(0,1fr));
-    gap:14px;
-    margin:1rem 0 2.4rem 0;
+    grid-template-columns:repeat(2,minmax(260px,1fr));
+    gap:16px;
+    max-width:760px;
+    margin:0 0 2.8rem 0;
 }
 .home-stat-card{
     min-height:126px;
     padding:20px 22px;
-    border:1px solid #dbe3ee;
+    border:1px solid #b7d2fb;
     border-radius:12px;
-    background:#ffffff;
-}
-.home-stat-card.primary{
     background:#eef5ff;
-    border-color:#b7d2fb;
 }
 .home-stat-label{
-    font-size:.9rem;
+    font-size:.92rem;
     color:#64748b;
-    font-weight:650;
+    font-weight:600;
     margin-bottom:.65rem;
 }
 .home-stat-value{
-    font-size:2rem;
+    font-family:"Pretendard","Apple SD Gothic Neo","Noto Sans KR",sans-serif;
+    font-size:2.05rem;
+    font-weight:600;
     line-height:1.15;
-    color:#0f172a;
-    font-weight:780;
-    letter-spacing:-.035em;
-}
-.home-stat-value.period{
-    font-size:1.25rem;
-    line-height:1.45;
-}
-.home-section{
-    margin-top:2.1rem;
-    margin-bottom:.8rem;
-}
-.home-section-title{
-    font-size:1.35rem;
-    font-weight:800;
-    letter-spacing:-.035em;
     color:#111827;
+    letter-spacing:-.025em;
 }
-@media (max-width: 800px){
-    .home-stat-grid{grid-template-columns:1fr;}
-    .home-stat-card{min-height:auto;}
+
+/* 상단 메뉴의 원형 radio 표시만 제거 */
+div[role="radiogroup"] > label > div:first-child{
+    display:none !important;
+}
+div[role="radiogroup"] > label{
+    padding-left:0 !important;
+    margin-right:.8rem !important;
+}
+div[role="radiogroup"] label:has(input:checked){
+    color:#102a43 !important;
+    font-weight:700 !important;
+}
+
+/* 홈 관심 선수 버튼을 작고 촘촘하게 표시 */
+div[data-testid="stButton"] > button {
+    border-radius:999px;
 }
 
 /* 앱 전체 제목 옆 Streamlit 자동 링크(앵커) 아이콘 숨김 */
@@ -1829,18 +1771,25 @@ if "presentation_mode" not in st.session_state:
 top1, top2 = st.columns([5,1])
 with top1:
     st.markdown(
-        '''
-        <div class="brand">⚾ 찐팬의 데이터 덕아웃</div>
-        <div style="font-size:17px;font-weight:500;color:#7a7f8c;margin-top:2px;">
-            나만의 KBO 스카우팅 리포트
+        """
+        <div class="brand-wrap">
+            <div class="brand">찐팬의 데이터 덕아웃</div>
+            <div class="tagline">
+                <span>나만의</span>
+                <span>KBO</span>
+                <span>스카우팅</span>
+                <span>리포트</span>
+            </div>
         </div>
-        ''',
+        """,
         unsafe_allow_html=True
     )
 
 with top2:
-    st.session_state.presentation_mode = st.toggle("발표 모드", value=st.session_state.presentation_mode,
-                                                   help="저장된 데이터만 사용합니다. NAVER에 새 요청을 보내지 않습니다.")
+    st.session_state.presentation_mode = st.toggle(
+        "발표 모드",
+        value=st.session_state.presentation_mode
+    )
 
 if st.session_state.presentation_mode:
     st.caption("발표 모드 · 저장된 데이터만 사용 중")
@@ -1872,44 +1821,31 @@ if nav == "홈":
     favs = favorite_players()
     fav_teams = favorite_teams()
     games = recent_games_light(5)
-    data_period = home_data_period()
 
     loader.empty()
 
-    # Lovable 시안에서 선택한 홈 디자인: 제목은 모두 한글화
     st.markdown(
-        """
-        <div class="home-hero">
-            <div class="home-hero-title">데이터 덕아웃 현황</div>
-            <div class="home-hero-desc">
-                수집·분석이 완료된 데이터 현황과 내가 등록한 관심 선수·팀, 최근 경기를 확인합니다.
-            </div>
-        </div>
-        """,
+        '<div class="home-status-title">데이터 덕아웃 현황</div>',
         unsafe_allow_html=True
     )
 
     st.markdown(
         f"""
         <div class="home-stat-grid">
-            <div class="home-stat-card primary">
+            <div class="home-stat-card">
                 <div class="home-stat-label">분석 경기</div>
                 <div class="home-stat-value">{summary['games']:,}</div>
             </div>
-            <div class="home-stat-card primary">
+            <div class="home-stat-card">
                 <div class="home-stat-label">등록 선수</div>
                 <div class="home-stat-value">{summary['players']:,}</div>
-            </div>
-            <div class="home-stat-card">
-                <div class="home-stat-label">자료 기간</div>
-                <div class="home-stat-value period">{data_period}</div>
             </div>
         </div>
         """,
         unsafe_allow_html=True
     )
 
-    st.markdown('<div class="home-section"><div class="home-section-title">관심 선수</div></div>', unsafe_allow_html=True)
+    st.markdown("### 관심 선수")
     if favs.empty:
         st.caption("등록된 관심 선수가 없습니다. 선수 페이지에서 ☆ 관심 선수 등록을 눌러 추가할 수 있습니다.")
     else:
@@ -1925,7 +1861,7 @@ if nav == "홈":
                     args=("선수", row["player_name"], None, row["player_id"])
                 )
 
-    st.markdown('<div class="home-section"><div class="home-section-title">관심 팀</div></div>', unsafe_allow_html=True)
+    st.markdown("### 관심 팀")
     if fav_teams.empty:
         st.caption("등록된 관심 팀이 없습니다. 팀 페이지에서 ☆ 관심 팀 등록을 눌러 추가할 수 있습니다.")
     else:
@@ -1940,22 +1876,24 @@ if nav == "홈":
                     args=("팀", None, row["team_name"])
                 )
 
-    st.markdown('<div class="home-section"><div class="home-section-title">최근 경기</div></div>', unsafe_allow_html=True)
+    st.markdown("### 최근 경기")
     if games.empty:
         st.caption("표시할 경기 자료가 없습니다.")
     else:
-        recent = games[["game_date","away_team","home_team","away_score","home_score"]].copy()
+        recent = games[["game_id","game_date","away_team","home_team","source_kind"]].copy()
 
-        def _score_text(row):
-            a = pd.to_numeric(row.get("away_score"), errors="coerce")
-            h = pd.to_numeric(row.get("home_score"), errors="coerce")
-            if pd.isna(a) or pd.isna(h):
+        def _home_score(row):
+            if str(row.get("source_kind")) != "NAVER":
                 return "-"
-            return f"{int(a)} : {int(h)}"
+            if st.session_state.presentation_mode:
+                return "-"
+            score = naver_final_score(row.get("game_id"))
+            return score or "-"
 
-        recent["스코어"] = recent.apply(_score_text, axis=1)
+        recent["스코어"] = recent.apply(_home_score, axis=1)
         recent = recent[["game_date","away_team","home_team","스코어"]]
         recent.columns = ["날짜","원정","홈","스코어"]
+
         st.dataframe(
             recent,
             hide_index=True,
