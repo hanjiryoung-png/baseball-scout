@@ -1608,63 +1608,63 @@ elif nav == "데이터":
     st.markdown("### 데이터 연결 상태")
     meta = _read_kbo_meta()
     s1,s2,s3,s4 = st.columns(4)
-   def status_card(col, title, value):
-    with col:
-        st.markdown(
-            f"""
-            <div style="
-                border:1px solid #e5e7eb;
-                border-radius:18px;
-                padding:22px 24px;
-                min-height:125px;
-                background:white;
-            ">
+      def status_card(col, title, value):
+        with col:
+            st.markdown(
+                f"""
                 <div style="
-                    font-size:24px;
-                    font-weight:700;
-                    color:#30323d;
-                    margin-bottom:14px;
+                    border:1px solid #e5e7eb;
+                    border-radius:18px;
+                    padding:22px 24px;
+                    min-height:125px;
+                    background:white;
                 ">
-                    {title}
+                    <div style="
+                        font-size:24px;
+                        font-weight:700;
+                        color:#30323d;
+                        margin-bottom:14px;
+                    ">
+                        {title}
+                    </div>
+                    <div style="
+                        font-size:18px;
+                        font-weight:400;
+                        color:#6b7280;
+                    ">
+                        {value}
+                    </div>
                 </div>
-                <div style="
-                    font-size:18px;
-                    font-weight:400;
-                    color:#6b7280;
-                ">
-                    {value}
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+                """,
+                unsafe_allow_html=True
+            )
 
-status_card(
-    s1,
-    "KBO 선수 기록",
-    f"{_display_date(meta.get('player_as_of') or '2026-08-10')} 기준" if status["kbo"] else "자료 없음"
-)
+    status_card(
+        s1,
+        "KBO 선수 기록",
+        f"{_display_date(meta.get('player_as_of') or '2026-08-10')} 기준"
+        if status["kbo"] else "자료 없음"
+    )
 
-status_card(
-    s2,
-    "KBO 팀 기록",
-    f"{_display_date(meta.get('team_as_of'))} 기준"
-    if status["kbo_team"] and meta.get("team_as_of")
-    else ("자료 있음" if status["kbo_team"] else "자료 없음")
-)
+    status_card(
+        s2,
+        "KBO 팀 기록",
+        f"{_display_date(meta.get('team_as_of'))} 기준"
+        if status["kbo_team"] and meta.get("team_as_of")
+        else ("자료 있음" if status["kbo_team"] else "자료 없음")
+    )
 
-status_card(
-    s3,
-    "NAVER 최신 자료",
-    f"{status['naver_games']}경기"
-)
+    status_card(
+        s3,
+        "NAVER 최신 자료",
+        f"{status['naver_games']}경기"
+    )
 
-status_card(
-    s4,
-    "Play-by-Play 자료",
-    f"{status['base_games']}경기"
-)
-
+    status_card(
+        s4,
+        "Play-by-Play 자료",
+        f"{status['base_games']}경기"
+    )
     st.markdown("### ① NAVER 최신 자료 추가")
     st.caption("출처: NAVER Sports 문자중계")
     entries=[]
