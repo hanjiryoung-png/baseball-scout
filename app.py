@@ -1,5 +1,4 @@
 
-
 import os, re, time, shutil, sqlite3, gc
 from pathlib import Path
 from datetime import datetime
@@ -1589,8 +1588,99 @@ elif nav == "팀":
     evidence_header()
 
     st.markdown("### KBO 공식 기록")
+    kbo_hitters, kbo_pitchers = kbo_records()
+
+    team_hitters = (
+        kbo_hitters[kbo_hitters["팀명"].astype(str).str.strip() == team].copy()
+        if kbo_hitters is not None and not kbo_hitters.empty and "팀명" in kbo_hitters.columns
+        else pd.DataFrame()
+    )
+    team_pitchers = (
+        kbo_pitchers[kbo_pitchers["팀명"].astype(str).str.strip() == team].copy()
+        if kbo_pitchers is not None and not kbo_pitchers.empty and "팀명" in kbo_pitchers.columns
+        else pd.DataFrame()
+    )
+
+    if team_hitters.empty and team_pitchers.empty:
+        st.info("해당 팀의 KBO 공식 기록을 찾지 못했습니다.")
+    else:
+        # KBO 원자료에서 직접 합산 가능한 팀 누적 기록
+        h_games = pd.to_numeric(team_hitters.get("경기", pd.Series(dtype=float)), errors="coerce")
+        h_pa = pd.to_numeric(team_hitters.get("타석", pd.Series(dtype=float)), errors="coerce")
+        h_ab = pd.to_numeric(team_hitters.get("타수", pd.Series(dtype=float)), errors="coerce")
+        h_hits = pd.to_numeric(team_hitters.get("안타", pd.Series(dtype=float)), errors="coerce")
+        h_hr = pd.to_numeric(team_hitters.get("홈런", pd.Series(dtype=float)), errors="coerce")
+        h_rbi = pd.to_numeric(team_hitters.get("타점", pd.Series(dtype=float)), errors="coerce")
+        h_bb = pd.to_numeric(team_hitters.get("볼넷", pd.Series(dtype=float)), errors="coerce")
+        h_so = pd.to_numeric(team_hitters.get("삼진", pd.Series(dtype=float)), errors="coerce")
+
+        p_games = pd.to_numeric(team_pitchers.get("경기", pd.Series(dtype=float)), errors="coerce")
+        p_ip = pd.to_numeric(team_pitchers.get("이닝", pd.Series(dtype=float)), errors="coerce")
+        p_er = pd.to_numeric(team_pitchers.get("자책", pd.Series(dtype=float)), errors="coerce")
+        p_h = pd.to_numeric(team_pitchers.get("피안타", pd.Series(dtype=float)), errors="coerce")
+        p_bb = pd.to_numeric(team_pitchers.get("볼넷", pd.Series(dtype=float)), errors="coerce")
+        p_so = pd.to_numeric(team_pitchers.get("탈삼진", pd.Series(dtype=float)), errors="coerce")
+
+        total_ab = h_ab.sum(min_count=1) if not h_ab.empty else float("nan")
+        total_hits = h_hits.sum(min_count=1) if not h_hits.empty else float("nan")
+        team_avg = (total_hits / total_ab) if pd.notna(total_ab) and total_ab > 0 else float("nan")
+
+        # 이닝은 KBO 표기의 .1/.2가 1/3, 2/3 이닝이므로 실제 이닝으로 환산
+        def kbo_ip_to_outs(v):
+            try:
+                s = str(v).strip()
+                if not s or s.lower() == "nan":
+                    return 0
+                if "." in s:
+                    whole, frac = s.split(".", 1)
+                    whole = int(float(whole))
+                    frac = int(frac[:1] or "0")
+                    return whole * 3 + (1 if frac == 1 else 2 if frac == 2 else 0)
+                return int(float(s)) * 3
+            except Exception:
+                return 0
+
+        total_outs = sum(kbo_ip_to_outs(v) for v in team_pitchers.get("이닝", pd.Series(dtype=object)).tolist())
+        real_ip = total_outs / 3 if total_outs else 0
+        total_er = p_er.sum(min_count=1) if not p_er.empty else float("nan")
+        total_ph = p_h.sum(min_count=1) if not p_h.empty else float("nan")
+        total_pbb = p_bb.sum(min_count=1) if not p_bb.empty else float("nan")
+        team_era = (total_er * 9 / real_ip) if real_ip > 0 and pd.notna(total_er) else float("nan")
+        team_whip = ((total_ph + total_pbb) / real_ip) if real_ip > 0 and pd.notna(total_ph) and pd.notna(total_pbb) else float("nan")
+
+        st.markdown("#### 타격 누적")
+        a,b,c,d = st.columns(4)
+        a.metric("등록 타자", len(team_hitters))
+        b.metric("타율", f"{team_avg:.3f}" if pd.notna(team_avg) else "-")
+        c.metric("홈런", int(h_hr.sum()) if not h_hr.empty and pd.notna(h_hr.sum()) else "-")
+        d.metric("타점", int(h_rbi.sum()) if not h_rbi.empty and pd.notna(h_rbi.sum()) else "-")
+
+        a,b,c,d = st.columns(4)
+        a.metric("타석", int(h_pa.sum()) if not h_pa.empty and pd.notna(h_pa.sum()) else "-")
+        b.metric("안타", int(h_hits.sum()) if not h_hits.empty and pd.notna(h_hits.sum()) else "-")
+        c.metric("볼넷", int(h_bb.sum()) if not h_bb.empty and pd.notna(h_bb.sum()) else "-")
+        d.metric("삼진", int(h_so.sum()) if not h_so.empty and pd.notna(h_so.sum()) else "-")
+
+        st.markdown("#### 투수 누적")
+        a,b,c,d = st.columns(4)
+        a.metric("등록 투수", len(team_pitchers))
+        b.metric("ERA", f"{team_era:.2f}" if pd.notna(team_era) else "-")
+        c.metric("WHIP", f"{team_whip:.2f}" if pd.notna(team_whip) else "-")
+        d.metric("탈삼진", int(p_so.sum()) if not p_so.empty and pd.notna(p_so.sum()) else "-")
+
+        # 원자료도 확인할 수 있게 핵심 열만 표로 제공
+        hitter_cols = [c for c in ["선수명","경기","타석","타수","안타","홈런","타점","볼넷","삼진","타율","OPS"] if c in team_hitters.columns]
+        pitcher_cols = [c for c in ["선수명","경기","승","패","세이브","홀드","이닝","자책","피안타","볼넷","탈삼진","평균자책점","WHIP"] if c in team_pitchers.columns]
+
+        with st.expander("KBO 타자 기록 보기"):
+            if hitter_cols:
+                st.dataframe(team_hitters[hitter_cols], hide_index=True, use_container_width=True)
+        with st.expander("KBO 투수 기록 보기"):
+            if pitcher_cols:
+                st.dataframe(team_pitchers[pitcher_cols], hide_index=True, use_container_width=True)
+
+    st.caption("2026 정규시즌 · 2026.08.10일 기준")
     st.caption("출처: KBO 공식 홈페이지")
-    st.info("KBO 팀 공식 기록 자료는 아직 연결되지 않았습니다. 팀 기록 확보 후 DATA DUGOUT 팀 분석에도 반영합니다.")
 
     st.markdown("### NAVER 최신 자료")
     n1,n2,n3=st.columns(3)
