@@ -9,7 +9,16 @@ import requests
 import streamlit as st
 
 APP_DIR = Path(__file__).resolve().parent
-DATA_DIR = Path(os.environ.get("DATA_DIR", str(APP_DIR / "data")))
+
+# Render Persistent Disk
+# Render에서 설정한 Mount path(/var/data)가 있으면 그곳을 영구 저장소로 사용합니다.
+# 로컬 실행처럼 /var/data가 없는 환경에서는 기존처럼 앱 폴더의 data를 사용합니다.
+RENDER_DISK_DIR = Path("/var/data")
+if RENDER_DISK_DIR.exists() and os.access(RENDER_DISK_DIR, os.W_OK):
+    DATA_DIR = RENDER_DISK_DIR
+else:
+    DATA_DIR = Path(os.environ.get("DATA_DIR", str(APP_DIR / "data")))
+
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "baseball_scout.db"
 SNAPSHOT_PATH = DATA_DIR / "presentation_snapshot.db"
