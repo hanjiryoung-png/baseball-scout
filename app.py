@@ -729,98 +729,190 @@ def data_source_status():
     }
 
 
+
+def _base_file_signature():
+    path = get_base_parquet_path()
+    if path is None:
+        return None, 0
+    try:
+        stat = path.stat()
+        return str(path), stat.st_mtime_ns
+    except Exception:
+        return str(path), 0
+
+
+@st.cache_data(show_spinner=False)
+def load_home_base_summary(path_text, modified_ns):
+    """홈 화면에 필요한 최소 정보만 Parquet에서 읽습니다."""
+    if not path_text:
+        return {
+            "game_ids": set(),
+            "recent_games": pd.DataFrame(columns=["game_date","away_team","home_team"]),
+            "players": pd.DataFrame(columns=["player_id","player_name","team"]),
+        }
+
+    path = Path(path_text)
+    if not path.exists():
+        return {
+            "game_ids": set(),
+            "recent_games": pd.DataFrame(columns=["game_date","away_team","home_team"]),
+            "players": pd.DataFrame(columns=["player_id","player_name","team"]),
+        }
+
+    cols = [
+        "game_pk","game_date","home_team","away_team","inning_topbot",
+        "pitcher","pitcher_name","batter","batter_name"
+    ]
+    raw = pd.read_parquet(path, columns=cols)
+
+    home = raw["home_team"].map(TEAM).fillna(raw["home_team"])
+    away = raw["away_team"].map(TEAM).fillna(raw["away_team"])
+    bottom = raw["inning_topbot"].astype(str).str.lower().isin(["bot","bottom","말"])
+
+    defense = away.where(bottom, home)
+    offense = home.where(bottom, away)
+
+    # 경기
+    games = pd.DataFrame({
+        "game_id": raw["game_pk"].astype(str),
+        "game_date": raw["game_date"].astype(str).str[:10],
+        "away_team": away,
+        "home_team": home,
+    }).drop_duplicates("game_id")
+
+    # 선수는 필요한 3개 열만 남기고 즉시 중복 제거
+    pitchers = pd.DataFrame({
+        "player_id": raw["pitcher"].fillna("").astype(str).str.strip(),
+        "player_name": raw["pitcher_name"].fillna("").astype(str).str.strip(),
+        "team": defense.fillna("").astype(str).str.strip(),
+    })
+    batters = pd.DataFrame({
+        "player_id": raw["batter"].fillna("").astype(str).str.strip(),
+        "player_name": raw["batter_name"].fillna("").astype(str).str.strip(),
+        "team": offense.fillna("").astype(str).str.strip(),
+    })
+
+    players = pd.concat([pitchers, batters], ignore_index=True)
+    players = players[
+        (players["player_name"] != "") &
+        (players["player_name"].str.lower() != "nan")
+    ].drop_duplicates(["player_id","player_name","team"])
+
+    return {
+        "game_ids": set(games["game_id"].astype(str)),
+        "recent_games": games[["game_date","away_team","home_team"]],
+        "players": players,
+    }
+
+
 def overview_counts():
-    """홈 요약 수치.
+    """홈 화면용 경량 집계.
 
-    경기 수:
-    - NAVER + Play-by-Play의 game_id를 합쳐 중복 제거
-
-    등록 선수 수:
-    - Play-by-Play/NAVER는 선수 ID를 우선 식별자로 사용
-    - KBO 공식 기록은 선수 ID가 없으므로 선수명+팀으로 기존 선수와 연결
-    - 선수명+팀이 직접 맞지 않아도 이름이 유일하면 같은 선수로 연결
-    - KBO에만 있는 선수는 선수명+팀 기준으로 별도 추가
+    전체 Play-by-Play DataFrame을 만들지 않고 필요한 열만 읽어서
+    경기 수와 등록 선수 수를 계산합니다.
     """
-    g = all_games()
-    p = all_pitches()
+    path_text, modified_ns = _base_file_signature()
+    base = load_home_base_summary(path_text, modified_ns)
+
+    # NAVER 추가 경기/선수는 SQLite에서 필요한 열만 읽음
+    nav_games = qdf("SELECT game_id, game_date, away_team, home_team FROM games")
+    nav_players = qdf("""
+        SELECT pitcher_id AS player_id, pitcher_name AS player_name, defense_team AS team
+        FROM pitches
+        UNION ALL
+        SELECT batter_id AS player_id, batter_name AS player_name, offense_team AS team
+        FROM pitches
+    """)
+
+    base_game_ids = base["game_ids"]
+
+    if nav_games is not None and not nav_games.empty:
+        nav_games = nav_games[
+            ~nav_games["game_id"].astype(str).isin(base_game_ids)
+        ].copy()
+        game_count = len(base_game_ids) + int(nav_games["game_id"].astype(str).nunique())
+    else:
+        game_count = len(base_game_ids)
+
+    players = base["players"].copy()
+
+    if nav_players is not None and not nav_players.empty:
+        nav_players["player_id"] = nav_players["player_id"].fillna("").astype(str).str.strip()
+        nav_players["player_name"] = nav_players["player_name"].fillna("").astype(str).str.strip()
+        nav_players["team"] = nav_players["team"].fillna("").astype(str).str.strip()
+        nav_players = nav_players[
+            (nav_players["player_name"] != "") &
+            (nav_players["player_name"].str.lower() != "nan")
+        ].drop_duplicates(["player_id","player_name","team"])
+        players = pd.concat([players, nav_players], ignore_index=True)
+
+    players["player_id"] = players["player_id"].fillna("").astype(str).str.strip()
+    players["player_name"] = players["player_name"].fillna("").astype(str).str.strip()
+    players["team"] = players["team"].fillna("").astype(str).str.strip()
+
+    # ID가 있는 선수는 ID 기준. ID 없는 경우 이름+팀 기준.
+    valid_id = (players["player_id"] != "") & (players["player_id"].str.lower() != "nan")
+    id_keys = set(("id:" + players.loc[valid_id, "player_id"]).tolist())
+    fallback_keys = set(
+        ("name_team:" + players.loc[~valid_id, "player_name"] + "|" + players.loc[~valid_id, "team"]).tolist()
+    )
+    player_keys = id_keys | fallback_keys
+
+    # KBO 공식 기록에만 존재하는 선수가 있는 경우만 추가
     kbo_h, kbo_p = kbo_records()
+    name_team_pairs = set(zip(players["player_name"], players["team"]))
+    name_counts = players.groupby("player_name")["player_id"].nunique(dropna=False).to_dict()
 
-    player_keys = set()
-    name_to_keys = {}
-    name_team_to_keys = {}
-
-    def add_source_players(df, id_col, name_col, team_col):
-        if df is None or df.empty:
-            return
-        if id_col not in df.columns or name_col not in df.columns:
-            return
-
-        cols = [id_col, name_col]
-        if team_col in df.columns:
-            cols.append(team_col)
-
-        d = df[cols].copy()
-        d[id_col] = d[id_col].fillna("").astype(str).str.strip()
-        d[name_col] = d[name_col].fillna("").astype(str).str.strip()
-
-        if team_col in d.columns:
-            d[team_col] = d[team_col].fillna("").astype(str).str.strip()
-        else:
-            d[team_col] = ""
-
-        d = d[
-            (d[name_col] != "") &
-            (d[name_col].str.lower() != "nan")
-        ]
-
-        for _, r in d.iterrows():
-            pid = r[id_col]
-            name = r[name_col]
-            team = r[team_col]
-
-            if pid and pid.lower() != "nan":
-                key = f"id:{pid}"
-            else:
-                key = f"name_team:{name}|{team}"
-
-            player_keys.add(key)
-            name_to_keys.setdefault(name, set()).add(key)
-            name_team_to_keys.setdefault((name, team), set()).add(key)
-
-    add_source_players(p, "pitcher_id", "pitcher_name", "defense_team")
-    add_source_players(p, "batter_id", "batter_name", "offense_team")
-
-    kbo_only_keys = set()
-
+    kbo_only = set()
     for df in (kbo_h, kbo_p):
         if df is None or df.empty or "선수명" not in df.columns:
             continue
-
-        for _, r in df.iterrows():
-            name = str(r.get("선수명", "")).strip()
-            team = str(r.get("팀명", "")).strip() if "팀명" in df.columns else ""
-
+        names = df["선수명"].fillna("").astype(str).str.strip()
+        teams = (
+            df["팀명"].fillna("").astype(str).str.strip()
+            if "팀명" in df.columns
+            else pd.Series([""] * len(df), index=df.index)
+        )
+        for name, team in zip(names, teams):
             if not name or name.lower() == "nan":
                 continue
-
-            matched = name_team_to_keys.get((name, team), set())
-
-            if not matched:
-                same_name = name_to_keys.get(name, set())
-                if len(same_name) == 1:
-                    matched = same_name
-
-            if matched:
+            if (name, team) in name_team_pairs:
                 continue
-
-            kbo_only_keys.add(f"kbo:{name}|{team}")
-
-    total_players = len(player_keys | kbo_only_keys)
+            if name_counts.get(name, 0) == 1:
+                continue
+            kbo_only.add(f"kbo:{name}|{team}")
 
     return {
-        "games": int(g["game_id"].nunique()) if g is not None and not g.empty else 0,
-        "players": total_players,
+        "games": int(game_count),
+        "players": len(player_keys | kbo_only),
     }
+
+
+def recent_games_light(limit=5):
+    """홈의 최근 경기 표 전용. 전체 투구 데이터는 읽지 않습니다."""
+    path_text, modified_ns = _base_file_signature()
+    base = load_home_base_summary(path_text, modified_ns)
+    base_games = base["recent_games"].copy()
+
+    nav = qdf("SELECT game_id, game_date, away_team, home_team FROM games")
+    if nav is not None and not nav.empty:
+        if base["game_ids"]:
+            nav = nav[~nav["game_id"].astype(str).isin(base["game_ids"])].copy()
+        nav = nav[["game_date","away_team","home_team"]]
+        games = pd.concat([base_games, nav], ignore_index=True)
+    else:
+        games = base_games
+
+    if games.empty:
+        return games
+
+    games["game_date"] = games["game_date"].astype(str)
+    return (
+        games.drop_duplicates()
+        .sort_values("game_date", ascending=False)
+        .head(limit)
+        .reset_index(drop=True)
+    )
 
 
 def analysis_header(title, period=None, source_note=None):
@@ -1089,24 +1181,13 @@ if st.session_state.presentation_mode:
 nav_items = ["홈","팀","선수"] if st.session_state.presentation_mode else ["홈","팀","선수","데이터"]
 if "main_nav" not in st.session_state or st.session_state.main_nav not in nav_items:
     st.session_state.main_nav = "홈"
-nav = st.radio("", nav_items, horizontal=True, label_visibility="collapsed", key="main_nav")
+nav = st.radio("메인 메뉴", nav_items, horizontal=True, label_visibility="collapsed", key="main_nav")
 
 def go_to(page, player_name=None):
     st.session_state.main_nav = page
     if player_name is not None:
         st.session_state.player_search = player_name
 
-
-loader = st.empty()
-with loader.container():
-    show_center_loader()
-
-games = all_games()
-if not games.empty:
-    games = games.sort_values(["game_date","saved_at"], ascending=[False,False], na_position="last")
-counts = current_counts()
-
-loader.empty()
 
 if nav == "홈":
     loader = st.empty()
@@ -1115,6 +1196,7 @@ if nav == "홈":
 
     summary = overview_counts()
     favs = favorite_players()
+    games = recent_games_light(5)
 
     loader.empty()
 
@@ -1142,7 +1224,7 @@ if nav == "홈":
     if games.empty:
         st.caption("표시할 경기 자료가 없습니다.")
     else:
-        recent = games[["game_date","away_team","home_team"]].drop_duplicates().head(5).copy()
+        recent = games[["game_date","away_team","home_team"]].copy()
         recent.columns = ["날짜","원정","홈"]
         st.dataframe(
             recent,
