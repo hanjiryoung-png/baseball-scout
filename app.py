@@ -1464,7 +1464,7 @@ def current_counts():
     return pd.Series(c)
 
 
-st.set_page_config(page_title="K-BASEBALL DATA DUGOUT", page_icon="⚾", layout="wide")
+st.set_page_config(page_title="찐팬의 데이터 덕아웃", page_icon="⚾", layout="wide")
 init_db()
 
 # 최초 실행 시 스냅샷이 없으면 빈 DB라도 백업 파일 생성
@@ -1535,7 +1535,7 @@ if "presentation_mode" not in st.session_state:
 
 top1, top2 = st.columns([5,1])
 with top1:
-    st.markdown('<div class="brand">⚾ K-BASEBALL DATA DUGOUT</div>', unsafe_allow_html=True)
+    st.markdown('<div class="brand">⚾ 찐팬의 데이터 덕아웃</div>', unsafe_allow_html=True)
 
 with top2:
     st.session_state.presentation_mode = st.toggle("발표 모드", value=st.session_state.presentation_mode,
@@ -1558,6 +1558,30 @@ def go_to(page, player_name=None):
 gc.collect()
 
 if nav == "홈":
+    st.markdown(
+        """
+        <div style="margin-bottom:30px;">
+            <div style="
+                font-size:42px;
+                font-weight:800;
+                line-height:1.15;
+                color:#30323d;
+                margin-bottom:8px;
+            ">
+                찐팬의 데이터 덕아웃
+            </div>
+            <div style="
+                font-size:20px;
+                font-weight:500;
+                line-height:1.35;
+                color:#7a7f8c;
+            ">
+                나만의 KBO 스카우팅 리포트
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     loader = st.empty()
     with loader.container():
         show_center_loader()
@@ -1891,22 +1915,121 @@ elif nav == "팀":
         b.metric("투수진 투구",len(thrown))
         c.metric("주 사용 구종",top_throw)
         d.metric("주 사용 비율",f"{top_throw_share:.1f}%" if top_throw!="-" else "-")
-        st.caption(f"세부 투구 분석 반영 경기: {analysis_games}경기 · KBO 공식 팀 기록과 Play-by-Play/NAVER 분석 범위는 서로 다를 수 있습니다.")
         a,b,c,d=st.columns(4)
         a.metric("타선이 본 투구",len(seen))
         b.metric("가장 많이 본 구종",top_seen)
         c.metric("상대 구종 비율",f"{top_seen_share:.1f}%" if top_seen!="-" else "-")
         d.metric("투수진 평균 구속",avg_speed_value(thrown))
 
-        # KBO 공식 팀 지표도 함께 제시
+        # KBO 공식 팀 기록을 단순 반복하지 않고 리그 내 상대 위치로 재구성
         if any(x is not None for x in [_hr,_pr,_dr,_rr]):
-            st.markdown("#### 공식 팀 지표")
-            k1,k2,k3,k4 = st.columns(4)
-            k1.metric("팀 타율", kbo_avg_value(_hr, "AVG") if _hr is not None else "-")
-            k2.metric("팀 ERA", metric_value(_pr, "ERA") if _pr is not None else "-")
-            k3.metric("수비율", metric_value(_dr, "FPCT") if _dr is not None else "-")
+            def _num(v):
+                try:
+                    return float(v)
+                except Exception:
+                    return None
+
+            def _rank_of(df0, team_name, col, higher_is_better=True):
+                if df0 is None or df0.empty or "팀명" not in df0.columns or col not in df0.columns:
+                    return "-"
+                d = df0[["팀명", col]].copy()
+                d[col] = pd.to_numeric(d[col], errors="coerce")
+                d = d.dropna(subset=[col])
+                if d.empty:
+                    return "-"
+                d = d.sort_values(col, ascending=not higher_is_better, kind="mergesort").reset_index(drop=True)
+                matches = d.index[d["팀명"].astype(str).str.strip() == team_name].tolist()
+                return matches[0] + 1 if matches else "-"
+
+            def _per_game(row, num_col):
+                if row is None:
+                    return None
+                g = _num(row.get("G"))
+                n = _num(row.get(num_col))
+                if not g or n is None:
+                    return None
+                return n / g
+
+            avg_rank = _rank_of(_th, team, "AVG", True)
+            runs_rank = _rank_of(_th.assign(
+                R_G=pd.to_numeric(_th.get("R"), errors="coerce") / pd.to_numeric(_th.get("G"), errors="coerce")
+            ) if not _th.empty else _th, team, "R_G", True)
+            hr_rank = _rank_of(_th.assign(
+                HR_G=pd.to_numeric(_th.get("HR"), errors="coerce") / pd.to_numeric(_th.get("G"), errors="coerce")
+            ) if not _th.empty else _th, team, "HR_G", True)
+
+            era_rank = _rank_of(_tp, team, "ERA", False)
+            whip_rank = _rank_of(_tp, team, "WHIP", False)
+            fpct_rank = _rank_of(_td, team, "FPCT", True)
+            sbpct_rank = _rank_of(_tr, team, "SB%", True)
+
+            runs_pg = _per_game(_hr, "R")
+            hr_pg = _per_game(_hr, "HR")
+
+            st.markdown("#### DATA DUGOUT 팀 프로필")
+            p1,p2,p3,p4 = st.columns(4)
+            p1.metric(
+                "공격 정확도",
+                f"타율 {kbo_avg_value(_hr, 'AVG')}" if _hr is not None else "-",
+                f"리그 {avg_rank}위" if avg_rank != "-" else None
+            )
+            p2.metric(
+                "득점 생산",
+                f"{runs_pg:.2f}점/경기" if runs_pg is not None else "-",
+                f"리그 {runs_rank}위" if runs_rank != "-" else None
+            )
+            p3.metric(
+                "장타 생산",
+                f"{hr_pg:.2f}HR/경기" if hr_pg is not None else "-",
+                f"리그 {hr_rank}위" if hr_rank != "-" else None
+            )
+            p4.metric(
+                "실점 억제",
+                f"ERA {metric_value(_pr, 'ERA')}" if _pr is not None else "-",
+                f"리그 {era_rank}위" if era_rank != "-" else None
+            )
+
+            p1,p2,p3,p4 = st.columns(4)
+            p1.metric(
+                "출루 허용",
+                f"WHIP {metric_value(_pr, 'WHIP')}" if _pr is not None else "-",
+                f"리그 {whip_rank}위" if whip_rank != "-" else None
+            )
+            p2.metric(
+                "수비 안정성",
+                f"FPCT {metric_value(_dr, 'FPCT')}" if _dr is not None else "-",
+                f"리그 {fpct_rank}위" if fpct_rank != "-" else None
+            )
             _sb = metric_value(_rr, "SB%") if _rr is not None else "-"
-            k4.metric("도루 성공률", f"{_sb}%" if _sb != "-" else "-")
+            p3.metric(
+                "주루 성공률",
+                f"{_sb}%" if _sb != "-" else "-",
+                f"리그 {sbpct_rank}위" if sbpct_rank != "-" else None
+            )
+            p4.metric(
+                "투구 성향",
+                top_throw,
+                f"{top_throw_share:.1f}% · 평균 {avg_speed_value(thrown)}" if top_throw != "-" else None
+            )
+
+            # 원자료를 조합한 짧은 해석: 사실 기반 순위/비율만 사용
+            insights = []
+            if avg_rank != "-":
+                insights.append(f"팀 타율은 리그 {avg_rank}위")
+            if era_rank != "-":
+                insights.append(f"팀 ERA는 리그 {era_rank}위")
+            if fpct_rank != "-":
+                insights.append(f"수비율은 리그 {fpct_rank}위")
+            if sbpct_rank != "-":
+                insights.append(f"도루 성공률은 리그 {sbpct_rank}위")
+            if top_throw != "-":
+                insights.append(f"투수진은 {top_throw}을 가장 많이 사용({top_throw_share:.1f}%)")
+            if top_seen != "-":
+                insights.append(f"타선은 상대 {top_seen}을 가장 많이 상대({top_seen_share:.1f}%)")
+
+            if insights:
+                st.markdown("#### 핵심 해석")
+                st.write(" · ".join(insights))
 
         st.markdown("#### 투수진 구종 구성")
         if not thrown.empty:
