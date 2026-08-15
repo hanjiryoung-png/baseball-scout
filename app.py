@@ -1468,6 +1468,18 @@ def analysis_header(title, period=None, source_note=None):
         st.caption(source_note)
 
 
+def team_analysis_header(title):
+    st.markdown(
+        f"""
+        <div class="team-analysis-head">
+            <div class="team-analysis-kicker">DATA DUGOUT ANALYSIS</div>
+            <div class="team-analysis-title">{title}</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
 def evidence_header():
     st.markdown('<div class="evidence-label">분석 근거 자료</div>', unsafe_allow_html=True)
 
@@ -1673,8 +1685,30 @@ header{visibility:hidden}
     white-space:nowrap;
 }
 .mode{font-size:.85rem;padding:.35rem .65rem;border-radius:999px;border:1px solid #ddd;display:inline-block}
-div[data-testid="stMetric"]{border:1px solid #ececec;border-radius:18px;padding:16px;background:#fff}
-div[data-testid="stDataFrame"]{border-radius:14px;overflow:hidden}
+
+/* 홈/팀 공통 디자인 톤 */
+html, body, [class*="css"]{
+    font-family:"Pretendard","Apple SD Gothic Neo","Noto Sans KR",sans-serif;
+}
+div[data-testid="stMetric"]{
+    border:1px solid #d8e6f7;
+    border-radius:14px;
+    padding:16px;
+    background:#ffffff;
+}
+div[data-testid="stMetric"] label{
+    color:#64748b !important;
+    font-weight:600 !important;
+}
+div[data-testid="stMetricValue"]{
+    color:#102a43 !important;
+    font-weight:600 !important;
+}
+div[data-testid="stDataFrame"]{
+    border-radius:12px;
+    overflow:hidden;
+    border:1px solid #e2e8f0;
+}
 
 /* 중앙 로딩 표시 */
 .center-loader{
@@ -1742,28 +1776,42 @@ div[data-testid="stDataFrame"]{border-radius:14px;overflow:hidden}
     letter-spacing:-.025em;
 }
 
-/* 상단 메뉴 radio 동그라미 완전 제거 */
-div[role="radiogroup"] input[type="radio"],
-div[role="radiogroup"] [data-testid="stRadio"] input,
-div[role="radiogroup"] label > div:first-child,
-div[role="radiogroup"] label svg{
-    display:none !important;
-    visibility:hidden !important;
-    width:0 !important;
-    min-width:0 !important;
-    height:0 !important;
-    margin:0 !important;
-    padding:0 !important;
+.team-page-title{
+    margin-top:2.2rem;
+    margin-bottom:1.1rem;
+    font-size:1.72rem;
+    font-weight:800;
+    letter-spacing:-.04em;
+    color:#102a43;
 }
-div[role="radiogroup"] label{
-    padding-left:0 !important;
-    margin-right:1.1rem !important;
-    gap:0 !important;
+.team-analysis-head{
+    margin-top:1.2rem;
+    margin-bottom:.6rem;
+    padding:18px 20px;
+    border:1px solid #b7d2fb;
+    border-radius:14px;
+    background:#eef5ff;
 }
-div[role="radiogroup"] label:has(input:checked){
-    color:#102a43 !important;
-    font-weight:700 !important;
+.team-analysis-kicker{
+    font-size:.72rem;
+    font-weight:800;
+    letter-spacing:.12em;
+    color:#6b7f99;
+    margin-bottom:.25rem;
 }
+.team-analysis-title{
+    font-size:1.55rem;
+    font-weight:800;
+    color:#102a43;
+    letter-spacing:-.035em;
+}
+.team-fav-label{
+    margin:.55rem 0 .25rem 0;
+    color:#64748b;
+    font-size:.82rem;
+    font-weight:600;
+}
+
 
 /* 홈 관심 선수 버튼을 작고 촘촘하게 표시 */
 div[data-testid="stButton"] > button {
@@ -2144,7 +2192,10 @@ elif nav == "데이터":
         except Exception as e: st.error(f"Parquet 파일을 읽지 못했습니다: {e}")
 
 elif nav == "팀":
-    st.markdown("## 팀")
+    st.markdown(
+        '<div class="team-page-title">팀</div>',
+        unsafe_allow_html=True
+    )
 
     # 팀 목록은 고정 10개 구단. 전체 시즌 Parquet를 먼저 열 필요가 없습니다.
     options = ["KT","LG","삼성","두산","KIA","NC","SSG","롯데","키움","한화"]
@@ -2156,7 +2207,12 @@ elif nav == "팀":
 
     team=st.selectbox("팀 선택", options, key="team_select")
 
+    # 관심 팀 기능을 팀 선택 바로 아래에 항상 표시
     team_fav_now = is_favorite_team(team)
+    st.markdown(
+        '<div class="team-fav-label">관심 팀</div>',
+        unsafe_allow_html=True
+    )
     if st.button(
         "★ 관심 팀 해제" if team_fav_now else "☆ 관심 팀 등록",
         key=f"fav_team_{team}"
@@ -2200,7 +2256,7 @@ elif nav == "팀":
 
     loader.empty()
 
-    analysis_header(f"{team} 팀 분석")
+    team_analysis_header(f"{team} 팀 분석")
     with st.container(border=True):
         top_throw,_,top_throw_share=top_pitch_info(thrown)
         top_seen,_,top_seen_share=top_pitch_info(seen)
