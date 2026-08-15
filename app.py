@@ -730,28 +730,96 @@ def data_source_status():
 
 
 def overview_counts():
-    """홈 요약 수치. 선수 수는 KBO + NAVER + Play-by-Play의 선수명을 합쳐 중복 제거합니다.
-    경기 수는 경기 ID가 존재하는 NAVER + Play-by-Play 자료의 중복 제거 합계입니다.
-    KBO 공식 기록은 시즌 누적 선수 통계라 경기별 ID가 없어 경기 수에는 중복 없이 합산할 수 없습니다.
+    """홈 요약 수치.
+
+    경기 수:
+    - NAVER + Play-by-Play의 game_id를 합쳐 중복 제거
+
+    등록 선수 수:
+    - Play-by-Play/NAVER는 선수 ID를 우선 식별자로 사용
+    - KBO 공식 기록은 선수 ID가 없으므로 선수명+팀으로 기존 선수와 연결
+    - 선수명+팀이 직접 맞지 않아도 이름이 유일하면 같은 선수로 연결
+    - KBO에만 있는 선수는 선수명+팀 기준으로 별도 추가
     """
     g = all_games()
     p = all_pitches()
     kbo_h, kbo_p = kbo_records()
 
-    names = []
-    if p is not None and not p.empty:
-        for col in ("pitcher_name", "batter_name"):
-            if col in p.columns:
-                s = p[col].dropna().astype(str).str.strip()
-                names.extend(s[(s != "") & (s != "nan")].tolist())
+    player_keys = set()
+    name_to_keys = {}
+    name_team_to_keys = {}
+
+    def add_source_players(df, id_col, name_col, team_col):
+        if df is None or df.empty:
+            return
+        if id_col not in df.columns or name_col not in df.columns:
+            return
+
+        cols = [id_col, name_col]
+        if team_col in df.columns:
+            cols.append(team_col)
+
+        d = df[cols].copy()
+        d[id_col] = d[id_col].fillna("").astype(str).str.strip()
+        d[name_col] = d[name_col].fillna("").astype(str).str.strip()
+
+        if team_col in d.columns:
+            d[team_col] = d[team_col].fillna("").astype(str).str.strip()
+        else:
+            d[team_col] = ""
+
+        d = d[
+            (d[name_col] != "") &
+            (d[name_col].str.lower() != "nan")
+        ]
+
+        for _, r in d.iterrows():
+            pid = r[id_col]
+            name = r[name_col]
+            team = r[team_col]
+
+            if pid and pid.lower() != "nan":
+                key = f"id:{pid}"
+            else:
+                key = f"name_team:{name}|{team}"
+
+            player_keys.add(key)
+            name_to_keys.setdefault(name, set()).add(key)
+            name_team_to_keys.setdefault((name, team), set()).add(key)
+
+    add_source_players(p, "pitcher_id", "pitcher_name", "defense_team")
+    add_source_players(p, "batter_id", "batter_name", "offense_team")
+
+    kbo_only_keys = set()
+
     for df in (kbo_h, kbo_p):
-        if df is not None and not df.empty and "선수명" in df.columns:
-            s = df["선수명"].dropna().astype(str).str.strip()
-            names.extend(s[(s != "") & (s != "nan")].tolist())
+        if df is None or df.empty or "선수명" not in df.columns:
+            continue
+
+        for _, r in df.iterrows():
+            name = str(r.get("선수명", "")).strip()
+            team = str(r.get("팀명", "")).strip() if "팀명" in df.columns else ""
+
+            if not name or name.lower() == "nan":
+                continue
+
+            matched = name_team_to_keys.get((name, team), set())
+
+            if not matched:
+                same_name = name_to_keys.get(name, set())
+                if len(same_name) == 1:
+                    matched = same_name
+
+            if matched:
+                continue
+
+            kbo_only_keys.add(f"kbo:{name}|{team}")
+
+    total_players = len(player_keys | kbo_only_keys)
 
     return {
         "games": int(g["game_id"].nunique()) if g is not None and not g.empty else 0,
-        "players": len(set(names)),
+        "players": total_players,
     }
 
 
