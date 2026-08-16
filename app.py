@@ -2528,7 +2528,7 @@ elif nav == "팀":
             sbpct_rank_label = _rank_label(_tr, team, "SB%", sbpct_rank)
 
             st.markdown("#### DATA DUGOUT 팀 프로필")
-            p1,p2,p3,p4 = st.columns(4)
+           p1,p2,p3,p4 = st.columns([1, 1.05, 1.35, 1])
             p1.metric(
                 "공격 정확도",
                 f"타율 {kbo_avg_value(_hr, 'AVG')}" if _hr is not None else "-",
