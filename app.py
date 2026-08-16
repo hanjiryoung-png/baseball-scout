@@ -1899,7 +1899,7 @@ with top1:
         """
         <div class="brand-wrap">
             <div class="brand">찐팬의 데이터 덕아웃</div>
-            <div class="tagline">나만의 KBO 스카우팅 리포트</div>
+            <div class="tagline">해솔's KBO 스카우팅 리포트</div>
         </div>
         """,
         unsafe_allow_html=True
