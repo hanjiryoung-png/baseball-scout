@@ -2182,7 +2182,6 @@ elif nav == "데이터":
             "KBO 선수 기록 Excel",
             type=["xlsx"],
             key="kbo_player_records_uploader",
-            help="타자_기본 / 타자_세부 / 투수_기본 / 투수_세부 시트가 필요합니다."
         )
         if st.button("KBO 선수 기록 업데이트", use_container_width=True):
             if player_upload is None:
@@ -2222,7 +2221,6 @@ elif nav == "데이터":
             "KBO 팀 기록 Excel",
             type=["xlsx"],
             key="kbo_team_records_uploader",
-            help="팀_타자 / 팀_투수 / 팀_수비 / 팀_주루 시트가 필요합니다."
         )
         if st.button("KBO 팀 기록 업데이트", use_container_width=True):
             if team_upload is None:
